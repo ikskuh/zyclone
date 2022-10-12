@@ -1,0 +1,3 @@
+[submodule "vendor/zlm"]
+	path = vendor/zlm
+	url = https://github.com/ziglibs/zlm
