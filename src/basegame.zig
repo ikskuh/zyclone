@@ -33,7 +33,7 @@ pub fn exit() void {
 var global_behaviours: BehaviourSystem(mem, void) = .{};
 
 pub fn attach(comptime Behaviour: type) *Behaviour {
-    return global_behaviours.attach(Behaviour);
+    return global_behaviours.attach({}, Behaviour);
 }
 
 pub fn behaviour(comptime Behaviour: type) ?*Behaviour {
@@ -106,7 +106,7 @@ pub const level = struct {
     }
 
     pub fn attach(comptime Behaviour: type) *Behaviour {
-        return level_behaviours.attach(Behaviour);
+        return level_behaviours.attach({}, Behaviour);
     }
 
     pub fn behaviour(comptime Behaviour: type) ?*Behaviour {
@@ -161,7 +161,7 @@ pub const Entity = struct {
     }
 
     pub fn attach(ent: *Entity, comptime Behaviour: type) *Behaviour {
-        return ent.behaviours.attach(Behaviour);
+        return ent.behaviours.attach(ent, Behaviour);
     }
 
     pub fn behaviour(ent: *Entity, comptime Behaviour: type) ?*Behaviour {
@@ -283,15 +283,57 @@ pub const screen = struct {
     pub var color: zg.Color = .{ .r = 0, .g = 0, .b = 0x80 };
 };
 
+pub const DefaultCamera = struct {
+    // const Mode = enum {
+    //     no_visualization,
+    //     only_stats,
+    //     with_objects,
+    // };
+
+    pub fn update(_: *@This()) void {
+        if (key.pressed(.escape))
+            exit();
+
+        const fps_mode = mouse.held(.secondary);
+
+        const velocity: f32 = if (key.held(.shift_left))
+            10.0
+        else
+            2.5;
+
+        if (key.held(.left))
+            camera.rot.pan += 90 * time.step;
+        if (key.held(.right))
+            camera.rot.pan -= 90 * time.step;
+        if (key.held(.page_up))
+            camera.rot.tilt -= 90 * time.step;
+        if (key.held(.page_down))
+            camera.rot.tilt += 90 * time.step;
+
+        if (fps_mode) {
+            camera.rot.pan -= @intToFloat(f32, mouse.delta.x);
+            camera.rot.tilt += @intToFloat(f32, mouse.delta.y);
+        }
+
+        const fwd = vec.forAngle(camera.rot).scale(velocity * time.step);
+        const left = vec.rotate(vector(1, 0, 0), camera.rot).scale(velocity * time.step);
+
+        if (key.held(.up) or (fps_mode and key.held(.w)))
+            camera.pos = camera.pos.add(fwd);
+        if (key.held(.down) or (fps_mode and key.held(.s)))
+            camera.pos = camera.pos.sub(fwd);
+
+        if (fps_mode and key.held(.a))
+            camera.pos = camera.pos.add(left);
+        if (fps_mode and key.held(.d))
+            camera.pos = camera.pos.sub(left);
+    }
+};
+
 /// do not use this!
 /// it's meant for internal use of the engine
 pub const @"__implementation" = struct {
     const game = @import("@GAME@");
-
-    comptime {
-        if (game.engine_verification_export.mem != mem)
-            @compileError("Invalid import loop!");
-    }
 
     const Application = main;
     var quit_now = false;
@@ -666,7 +708,7 @@ fn BehaviourSystem(comptime memory_module: type, comptime Context: type) type {
 
         list: List = .{},
 
-        pub fn attach(instance: *System, comptime Behaviour: type) *Behaviour {
+        pub fn attach(instance: *System, context: Context, comptime Behaviour: type) *Behaviour {
             if (instance.behaviour(Behaviour)) |oh_behave|
                 return oh_behave;
 
@@ -698,8 +740,8 @@ fn BehaviourSystem(comptime memory_module: type, comptime Context: type) type {
                 .data = undefined,
             };
 
-            if (@hasDecl(Storage, "init")) {
-                storage.data.init(instance, &storage.data);
+            if (@hasDecl(Behaviour, "init")) {
+                Behaviour.init(context, &storage.data);
             } else {
                 // If no init function is present,
                 // we use a default initalization.
