@@ -1,16 +1,13 @@
 const std = @import("std");
 const zlm = @import("zlm");
+const zg = @import("zero-graphics");
 const main = @import("entrypoint.zig");
+
+var global_behaviours: BehaviourSystem(void) = .{};
 
 pub const nullvector = zlm.vec3(0, 0, 0);
 pub const vector = zlm.vec3;
 pub const Vector3 = zlm.Vec3;
-
-pub const @"__implementation" = struct {
-    pub fn init() !void {
-        level.arena = std.heap.ArenaAllocator.init(mem.backing);
-    }
-};
 
 pub const Angle = struct {
     pub const zero = Angle{ .pan = 0, .tilt = 0, .roll = 0 };
@@ -19,6 +16,23 @@ pub const Angle = struct {
     tilt: f32,
     roll: f32 = 0,
 };
+
+/// Shuts down the engine
+pub fn exit() void {
+    @"__implementation".quit_now = true;
+}
+
+pub fn attach(comptime Behaviour: type) *Behaviour {
+    return global_behaviours.attach(Behaviour);
+}
+
+pub fn behaviour(comptime Behaviour: type) ?*Behaviour {
+    return global_behaviours.behaviour(Behaviour);
+}
+
+pub fn detach(comptime Behaviour: type) void {
+    return global_behaviours.detach(Behaviour);
+}
 
 pub const time = struct {
     pub var step: f32 = 0;
@@ -91,95 +105,199 @@ pub const entity = struct {
     }
 };
 
-pub const Entity = struct {
-    const BehaviourID = enum(usize) {
-        _,
+const BehaviourID = enum(usize) { _ };
 
-        pub fn isType(self: BehaviourID, comptime T: type) bool {
-            return (self == BehaviourStorage(T).id());
+fn BehaviourSystem(comptime Context: type) type {
+    return struct {
+        const System = @This();
+
+        const Instance = struct {
+            update: std.meta.FnPtr(fn (context: Context, node: *Node) void),
+            id: BehaviourID,
+        };
+
+        pub const List = std.TailQueue(Instance);
+        pub const Node = List.Node;
+
+        list: List = .{},
+
+        pub fn attach(instance: *System, comptime Behaviour: type) *Behaviour {
+            if (instance.behaviour(Behaviour)) |oh_behave|
+                return oh_behave;
+
+            const Storage = BehaviourStorage(Behaviour);
+
+            const Updater = struct {
+                fn update(ctx: Context, node: *Node) void {
+                    if (!@hasDecl(Behaviour, "update"))
+                        return;
+                    const storage = @fieldParentPtr(Storage, "node", node);
+                    // void is used to differentiate between basic and context based update.
+                    // as void as a nonsensical value to pass, we can distinct on that.
+                    if (Context != void) {
+                        Behaviour.update(ctx, &storage.data);
+                    } else {
+                        Behaviour.update(&storage.data);
+                    }
+                }
+            };
+
+            const storage = level.create(Storage);
+            storage.* = Storage{
+                .node = .{
+                    .data = .{
+                        .id = Storage.id(),
+                        .update = Updater.update,
+                    },
+                },
+                .data = undefined,
+            };
+
+            if (@hasDecl(Storage, "init")) {
+                storage.data.init(instance, &storage.data);
+            } else {
+                // If no init function is present,
+                // we use a default initalization.
+                storage.data = Behaviour{};
+            }
+
+            instance.list.append(&storage.node);
+
+            return &storage.data;
+        }
+
+        pub fn behaviour(instance: *System, comptime Behaviour: type) ?*Behaviour {
+            const Storage = BehaviourStorage(Behaviour);
+
+            var it = instance.list.first;
+            while (it) |node| : (it = node.next) {
+                if (node.data.id == Storage.id()) {
+                    return &@fieldParentPtr(Storage, "node", node).data;
+                }
+            }
+            return null;
+        }
+
+        pub fn updateAll(instance: *System, context: Context) void {
+            var behave_it = instance.list.first;
+            while (behave_it) |behave_node| : (behave_it = behave_node.next) {
+                behave_node.data.update(context, behave_node);
+            }
+        }
+
+        pub fn detach(instance: *System, comptime Behaviour: type) void {
+            const Storage = BehaviourStorage(Behaviour);
+
+            var it = instance.list;
+            while (it) |node| : (it = node.next) {
+                if (node.data == Storage.id()) {
+                    instance.list.remove(node);
+
+                    const storage = @fieldParentPtr(Storage, "node", node);
+
+                    if (@hasDecl(Behaviour, "deinit")) {
+                        storage.data.deinit();
+                    }
+
+                    std.log.err("TODO: Free the node here", .{});
+
+                    return;
+                }
+            }
+        }
+
+        fn BehaviourStorage(comptime Behaviour: type) type {
+            return struct {
+                var storage_id_buffer: u8 = 0;
+
+                pub inline fn id() BehaviourID {
+                    return @intToEnum(BehaviourID, @ptrToInt(&storage_id_buffer));
+                }
+
+                node: Node,
+                data: Behaviour,
+            };
         }
     };
+}
 
+pub const Entity = struct {
+    const Behaviours = BehaviourSystem(*Entity);
+
+    // public:
     pos: Vector3 = nullvector,
     scale: Vector3 = zlm.Vec3.one,
     rot: Angle = Angle.zero,
 
-    behaviours: std.TailQueue(BehaviourID) = .{},
+    user_data: [256]u8 = undefined,
+
+    // private:
+    behaviours: Behaviours = .{},
 
     pub fn destroy(e: *Entity) void {
         const node = @fieldParentPtr(std.TailQueue(Entity).Node, "data", e);
         level.entities.remove(node);
     }
 
-    pub fn attach(instance: *Entity, comptime Behaviour: type) *Behaviour {
-        if (instance.behaviour(Behaviour)) |oh_behave|
-            return oh_behave;
-
-        const Storage = BehaviourStorage(Behaviour);
-
-        const storage = level.create(Storage);
-        storage.* = Storage{
-            .node = .{ .data = Storage.id() },
-            .data = undefined,
-        };
-
-        if (@hasDecl(Storage, "init")) {
-            storage.data.init(instance, &storage.data);
-        } else {
-            // If no init function is present,
-            // we use a default initalization.
-            storage.data = Behaviour{};
-        }
-
-        instance.behaviours.append(&storage.node);
-
-        return &storage.data;
+    pub fn attach(ent: *Entity, comptime Behaviour: type) *Behaviour {
+        return ent.behaviours.attach(Behaviour);
     }
 
-    pub fn behaviour(instance: *Entity, comptime Behaviour: type) ?*Behaviour {
-        const Storage = BehaviourStorage(Behaviour);
-
-        var it = instance.behaviours.first;
-        while (it) |node| : (it = node.next) {
-            if (node.data == Storage.id()) {
-                return &@fieldParentPtr(Storage, "node", node).data;
-            }
-        }
-        return null;
+    pub fn behaviour(ent: *Entity, comptime Behaviour: type) ?*Behaviour {
+        return ent.behaviours.behaviour(Behaviour);
     }
 
-    pub fn detach(instance: *Entity, comptime Behaviour: type) void {
-        const Storage = BehaviourStorage(Behaviour);
+    pub fn detach(ent: *Entity, comptime Behaviour: type) void {
+        return ent.behaviours.detach(Behaviour);
+    }
+};
 
-        var it = instance.behaviours;
-        while (it) |node| : (it = node.next) {
-            if (node.data == Storage.id()) {
-                instance.behaviours.remove(node);
+pub const Key = zg.Input.Scancode;
 
-                const storage = @fieldParentPtr(Storage, "node", node);
+pub const key = struct {
+    var held_keys: std.enums.EnumSet(zg.Input.Scancode) = .{};
+    var pressed_keys: std.enums.EnumSet(zg.Input.Scancode) = .{};
+    var released_keys: std.enums.EnumSet(zg.Input.Scancode) = .{};
 
-                if (@hasDecl(Behaviour, "deinit")) {
-                    storage.data.deinit();
-                }
-
-                std.log.err("TODO: Free the node here", .{});
-
-                return;
-            }
-        }
+    /// returns true if the `key` is currently held down.
+    pub fn held(key_code: zg.Input.Scancode) bool {
+        return held_keys.contains(key_code);
     }
 
-    fn BehaviourStorage(comptime Behaviour: type) type {
-        return struct {
-            var storage_id_buffer: u8 = 0;
+    /// returns true if the `key` is was pressed this frame.
+    pub fn pressed(key_code: zg.Input.Scancode) bool {
+        return pressed_keys.contains(key_code);
+    }
 
-            pub inline fn id() BehaviourID {
-                return @intToEnum(BehaviourID, @ptrToInt(&storage_id_buffer));
-            }
+    /// returns true if the `key` is was released this frame.
+    pub fn released(key_code: zg.Input.Scancode) bool {
+        return released_keys.contains(key_code);
+    }
+};
 
-            node: std.TailQueue(BehaviourID).Node,
-            data: Behaviour,
-        };
+pub const mouse = struct {
+    pub const Button = zg.Input.MouseButton;
+
+    pub var position: zg.Point = zg.Point.zero;
+    pub var delta: zg.Point = zg.Point.zero;
+
+    var held_buttons: std.enums.EnumSet(Button) = .{};
+    var pressed_buttons: std.enums.EnumSet(Button) = .{};
+    var released_buttons: std.enums.EnumSet(Button) = .{};
+
+    /// returns true if the `key` is currently held down.
+    pub fn held(button_index: Button) bool {
+        return held_buttons.contains(button_index);
+    }
+
+    /// returns true if the `key` is was pressed this frame.
+    pub fn pressed(button_index: Button) bool {
+        return pressed_buttons.contains(button_index);
+    }
+
+    /// returns true if the `key` is was released this frame.
+    pub fn released(button_index: Button) bool {
+        return released_buttons.contains(button_index);
     }
 };
 
@@ -200,3 +318,202 @@ pub const Entity = struct {
 // pub const scheduler = struct {
 //     //
 // };
+
+/// do not use this!
+/// it's meant for internal use of the engine
+pub const @"__implementation" = struct {
+    const game = @import("@GAME@");
+
+    comptime {
+        if (game.engine_verification_export.mem != mem)
+            @compileError("Invalid import loop!");
+    }
+
+    const Application = main;
+    var quit_now = false;
+
+    fn core() *zg.CoreApplication {
+        return zg.CoreApplication.get();
+    }
+
+    // pub var scheduler: Scheduler = undefined;
+
+    pub fn init(app: *Application) !void {
+        app.* = .{};
+
+        mem.backing = core().allocator;
+        level.arena = std.heap.ArenaAllocator.init(mem.backing);
+
+        // scheduler = Scheduler.init();
+        // defer scheduler.deinit();
+
+        // Coroutine(game.main).start(.{});
+        try game.main();
+    }
+
+    pub fn update(app: *Application) !bool {
+        _ = app;
+
+        key.pressed_keys = .{};
+        key.released_keys = .{};
+
+        mouse.pressed_buttons = .{};
+        mouse.released_buttons = .{};
+
+        const prev_mouse_pos = mouse.position;
+        while (zg.CoreApplication.get().input.fetch()) |event| {
+            switch (event) {
+                .quit => return false,
+
+                .key_down => |key_code| {
+                    key.pressed_keys.insert(key_code);
+                    key.held_keys.insert(key_code);
+                },
+
+                .key_up => |key_code| {
+                    key.released_keys.insert(key_code);
+                    key.held_keys.remove(key_code);
+                },
+
+                .pointer_motion => |position| {
+                    mouse.position = position;
+                },
+
+                .pointer_press => |button| {
+                    mouse.pressed_buttons.insert(button);
+                    mouse.held_buttons.insert(button);
+                },
+                .pointer_release => |button| {
+                    mouse.released_buttons.insert(button);
+                    mouse.held_buttons.remove(button);
+                },
+
+                .text_input => |input| {
+                    _ = input;
+                },
+            }
+        }
+
+        mouse.delta = .{
+            .x = mouse.position.x - prev_mouse_pos.x,
+            .y = mouse.position.y - prev_mouse_pos.y,
+        };
+
+        // global update process
+        {
+            global_behaviours.updateAll({});
+        }
+
+        // entity update process
+        {
+            var it = level.entities.first;
+            while (it) |node| : (it = node.next) {
+                const ent: *Entity = &node.data;
+
+                ent.behaviours.updateAll(ent);
+            }
+        }
+
+        // var index: usize = 0;
+        // while (index < 20) : (index += 1) {
+        //     scheduler.nextFrame();
+        // }
+
+        return (quit_now == false);
+    }
+
+    pub fn render(app: *Application) !void {
+        //
+        _ = app;
+    }
+
+    pub fn deinit(app: *Application) void {
+        _ = app;
+    }
+};
+
+// Include when stage2 can async:
+
+// pub const Scheduler = struct {
+//     pub const TaskInfo = struct {
+//         frame: anyframe,
+//     };
+//     pub const Process = struct {};
+//     pub const WaitList = std.TailQueue(TaskInfo);
+//     pub const WaitNode = WaitList.Node;
+//     pub const ProcList = std.TailQueue(Process);
+//     pub const ProcNode = ProcList.Node;
+
+//     current_frame: WaitList = .{},
+//     next_frame: WaitList = .{},
+//     process_list: ProcList = .{},
+
+//     fn init() Scheduler {
+//         return Scheduler{};
+//     }
+
+//     pub fn deinit(sched: *Scheduler) void {
+//         sched.* = undefined;
+//     }
+
+//     pub fn appendWaitNode(sched: *Scheduler, node: *WaitNode) void {
+//         sched.next_frame.append(node);
+//     }
+
+//     pub fn nextFrame(sched: *Scheduler) void {
+//         while (sched.current_frame.popFirst()) |func| {
+//             resume func.data.frame;
+//         }
+
+//         sched.current_frame = sched.next_frame;
+//         sched.next_frame = .{};
+//     }
+// };
+
+// fn Coroutine(func: anytype) type {
+//     const Func = @TypeOf(func);
+//     const info: std.builtin.Type.Fn = @typeInfo(Func).Fn;
+//     const return_type = info.return_type orelse @compileError("Must be non-generic function");
+
+//     switch (@typeInfo(return_type)) {
+//         .ErrorUnion, .Void => {},
+//         else => @compileError("Coroutines can't return values!"),
+//     }
+
+//     return struct {
+//         const Coro = @This();
+//         const Frame = @Frame(wrappedCall);
+
+//         const ProcNode = struct {
+//             process: Scheduler.ProcNode,
+//             frame: Frame,
+//             result: void,
+//         };
+
+//         fn wrappedCall(mem: *ProcNode, args: std.meta.ArgsTuple(Func)) void {
+//             var inner_result = @call(.{}, func, args);
+//             switch (@typeInfo(return_type)) {
+//                 .ErrorUnion => inner_result catch |err| std.log.err("{s} failed with error {s}", .{
+//                     @typeName(Coro),
+//                     @errorName(err),
+//                 }),
+//                 .Void => {},
+//                 else => @compileError("Coroutines can't return values!"),
+//             }
+//             scheduler.process_list.remove(&mem.process);
+//             engine.mem.destroy(mem);
+//         }
+
+//         pub fn start(args: anytype) void {
+//             const mem = engine.mem.create(ProcNode);
+
+//             mem.* = .{
+//                 .process = .{ .data = Scheduler.Process{} },
+//                 .frame = undefined,
+//                 .result = {},
+//             };
+//             scheduler.process_list.append(&mem.process);
+//             _ = @asyncCall(std.mem.asBytes(&mem.frame), &mem.result, wrappedCall, .{ mem, args });
+//         }
+//     };
+// }
