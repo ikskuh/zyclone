@@ -9,3 +9,6 @@ pub const pkgs = struct {
         .source = .{ .path = "vendor/zlm/zlm.zig" },
     };
 };
+pub const sdks = struct {
+    pub const @"zero-graphics" = @import("vendor/zero-graphics/Sdk.zig");
+};

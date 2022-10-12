@@ -5,11 +5,13 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
-    const exe = b.addExecutable("3rd-person", "src/entrypoint.zig");
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
-    exe.addPackage(zpm.pkgs.zlm);
-    exe.addPackage(std.build.Pkg{
+    const sdk = zpm.sdks.@"zero-graphics".init(b, false);
+
+    const app = sdk.createApplication("3rd_person", "src/entrypoint.zig");
+    app.setBuildMode(mode);
+
+    app.addPackage(zpm.pkgs.zlm);
+    app.addPackage(std.build.Pkg{
         .name = "@GAME@",
         .source = .{ .path = "demo/3rd-person.zig" },
         .dependencies = &.{std.build.Pkg{
@@ -17,10 +19,11 @@ pub fn build(b: *std.build.Builder) void {
             .source = .{ .path = "src/package.zig" },
         }},
     });
-    exe.linkLibC();
-    exe.install();
 
-    const run_cmd = exe.run();
+    const instance = app.compileFor(.{ .desktop = target });
+    instance.install();
+
+    const run_cmd = instance.run();
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_cmd.addArgs(args);

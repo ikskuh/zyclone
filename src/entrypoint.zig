@@ -1,7 +1,10 @@
 const std = @import("std");
+const zg = @import("zero-graphics");
 const game = @import("@GAME@");
 
 pub const engine = @import("basegame.zig");
+
+const Application = @This();
 
 comptime {
     if (game.engine_verification_export.mem != engine.mem)
@@ -10,7 +13,9 @@ comptime {
 
 // pub var scheduler: Scheduler = undefined;
 
-pub fn main() !void {
+pub fn init(app: *Application) !void {
+    app.* = .{};
+
     // scheduler = Scheduler.init();
     // defer scheduler.deinit();
 
@@ -24,6 +29,21 @@ pub fn main() !void {
     try engine.@"__implementation".init();
 
     try game.main();
+}
+pub fn update(app: *Application) !bool {
+    _ = app;
+    while (zg.CoreApplication.get().input.fetch()) |event| {
+        if (event == .quit)
+            return false;
+    }
+    return true;
+}
+pub fn render(app: *Application) !void {
+    //
+    _ = app;
+}
+pub fn deinit(app: *Application) void {
+    _ = app;
 }
 
 // Include when stage2 can async:
