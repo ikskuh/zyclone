@@ -3,11 +3,15 @@ const zlm = @import("zlm");
 const zg = @import("zero-graphics");
 const main = @import("entrypoint.zig");
 
-var global_behaviours: BehaviourSystem(void) = .{};
+fn core() *zg.CoreApplication {
+    return zg.CoreApplication.get();
+}
 
 pub const nullvector = zlm.vec3(0, 0, 0);
 pub const vector = zlm.vec3;
 pub const Vector3 = zlm.Vec3;
+
+pub const Matrix4 = zlm.Mat4;
 
 pub const Angle = struct {
     pub const zero = Angle{ .pan = 0, .tilt = 0, .roll = 0 };
@@ -22,6 +26,12 @@ pub fn exit() void {
     @"__implementation".quit_now = true;
 }
 
+////////////////////////////////////////////////
+// Global behaviour system
+////////////////////////////////////////////////
+
+var global_behaviours: BehaviourSystem(mem, void) = .{};
+
 pub fn attach(comptime Behaviour: type) *Behaviour {
     return global_behaviours.attach(Behaviour);
 }
@@ -34,6 +44,10 @@ pub fn detach(comptime Behaviour: type) void {
     return global_behaviours.detach(Behaviour);
 }
 
+////////////////////////////////////////////////
+// Modules
+////////////////////////////////////////////////
+
 pub const time = struct {
     pub var step: f32 = 0;
     pub var total: f32 = 0;
@@ -43,7 +57,7 @@ pub const mem = struct {
     var backing: std.mem.Allocator = std.heap.c_allocator;
 
     pub fn create(comptime T: type) *T {
-        return backing.create(T) catch @panic("out of memory");
+        return backing.create(T) catch oom();
     }
 
     pub fn destroy(ptr: anytype) void {
@@ -51,7 +65,7 @@ pub const mem = struct {
     }
 
     pub fn alloc(comptime T: type, count: usize) []T {
-        return backing.alloc(T, count) catch @panic("out of memory");
+        return backing.alloc(T, count) catch oom();
     }
 
     pub fn free(ptr: anytype) void {
@@ -61,13 +75,14 @@ pub const mem = struct {
 
 pub const level = struct {
     var arena: std.heap.ArenaAllocator = undefined;
-
     var entities: std.TailQueue(Entity) = .{};
+    var level_behaviours: BehaviourSystem(level, void) = .{};
 
     pub fn load(path: ?[]const u8) void {
         arena.deinit();
         arena = std.heap.ArenaAllocator.init(mem.backing);
         entities = .{};
+        level_behaviours = .{};
 
         if (path) |real_path| {
             std.log.err("implement loading level file '{s}'", .{real_path});
@@ -75,11 +90,31 @@ pub const level = struct {
     }
 
     pub fn create(comptime T: type) *T {
-        return arena.allocator().create(T) catch @panic("out of memory");
+        return arena.allocator().create(T) catch oom();
     }
 
     pub fn alloc(comptime T: type, count: usize) []T {
-        return arena.allocator().alloc(T, count) catch @panic("out of memory");
+        return arena.allocator().alloc(T, count) catch oom();
+    }
+
+    pub fn destroy(ptr: anytype) void {
+        arena.allocator().destroy(ptr);
+    }
+
+    pub fn free(ptr: anytype) void {
+        arena.allocator().free(ptr);
+    }
+
+    pub fn attach(comptime Behaviour: type) *Behaviour {
+        return level_behaviours.attach(Behaviour);
+    }
+
+    pub fn behaviour(comptime Behaviour: type) ?*Behaviour {
+        return level_behaviours.behaviour(Behaviour);
+    }
+
+    pub fn detach(comptime Behaviour: type) void {
+        return level_behaviours.detach(Behaviour);
     }
 };
 
@@ -93,136 +128,21 @@ pub const entity = struct {
         };
 
         if (file) |actual_file_path| {
-            // TODO: Load geometry and attach to file
-            std.log.err("implement loading model file '{s}'", .{actual_file_path});
+            ent.data.geometry = @"__implementation".loadGeometry(actual_file_path);
         }
 
         if (Behaviour) |ActualBehaviour| {
             _ = ent.data.attach(ActualBehaviour);
         }
 
+        level.entities.append(ent);
+
         return &ent.data;
     }
 };
 
-const BehaviourID = enum(usize) { _ };
-
-fn BehaviourSystem(comptime Context: type) type {
-    return struct {
-        const System = @This();
-
-        const Instance = struct {
-            update: std.meta.FnPtr(fn (context: Context, node: *Node) void),
-            id: BehaviourID,
-        };
-
-        pub const List = std.TailQueue(Instance);
-        pub const Node = List.Node;
-
-        list: List = .{},
-
-        pub fn attach(instance: *System, comptime Behaviour: type) *Behaviour {
-            if (instance.behaviour(Behaviour)) |oh_behave|
-                return oh_behave;
-
-            const Storage = BehaviourStorage(Behaviour);
-
-            const Updater = struct {
-                fn update(ctx: Context, node: *Node) void {
-                    if (!@hasDecl(Behaviour, "update"))
-                        return;
-                    const storage = @fieldParentPtr(Storage, "node", node);
-                    // void is used to differentiate between basic and context based update.
-                    // as void as a nonsensical value to pass, we can distinct on that.
-                    if (Context != void) {
-                        Behaviour.update(ctx, &storage.data);
-                    } else {
-                        Behaviour.update(&storage.data);
-                    }
-                }
-            };
-
-            const storage = level.create(Storage);
-            storage.* = Storage{
-                .node = .{
-                    .data = .{
-                        .id = Storage.id(),
-                        .update = Updater.update,
-                    },
-                },
-                .data = undefined,
-            };
-
-            if (@hasDecl(Storage, "init")) {
-                storage.data.init(instance, &storage.data);
-            } else {
-                // If no init function is present,
-                // we use a default initalization.
-                storage.data = Behaviour{};
-            }
-
-            instance.list.append(&storage.node);
-
-            return &storage.data;
-        }
-
-        pub fn behaviour(instance: *System, comptime Behaviour: type) ?*Behaviour {
-            const Storage = BehaviourStorage(Behaviour);
-
-            var it = instance.list.first;
-            while (it) |node| : (it = node.next) {
-                if (node.data.id == Storage.id()) {
-                    return &@fieldParentPtr(Storage, "node", node).data;
-                }
-            }
-            return null;
-        }
-
-        pub fn updateAll(instance: *System, context: Context) void {
-            var behave_it = instance.list.first;
-            while (behave_it) |behave_node| : (behave_it = behave_node.next) {
-                behave_node.data.update(context, behave_node);
-            }
-        }
-
-        pub fn detach(instance: *System, comptime Behaviour: type) void {
-            const Storage = BehaviourStorage(Behaviour);
-
-            var it = instance.list;
-            while (it) |node| : (it = node.next) {
-                if (node.data == Storage.id()) {
-                    instance.list.remove(node);
-
-                    const storage = @fieldParentPtr(Storage, "node", node);
-
-                    if (@hasDecl(Behaviour, "deinit")) {
-                        storage.data.deinit();
-                    }
-
-                    std.log.err("TODO: Free the node here", .{});
-
-                    return;
-                }
-            }
-        }
-
-        fn BehaviourStorage(comptime Behaviour: type) type {
-            return struct {
-                var storage_id_buffer: u8 = 0;
-
-                pub inline fn id() BehaviourID {
-                    return @intToEnum(BehaviourID, @ptrToInt(&storage_id_buffer));
-                }
-
-                node: Node,
-                data: Behaviour,
-            };
-        }
-    };
-}
-
 pub const Entity = struct {
-    const Behaviours = BehaviourSystem(*Entity);
+    const Behaviours = BehaviourSystem(level, *Entity);
 
     // public:
     pos: Vector3 = nullvector,
@@ -230,6 +150,7 @@ pub const Entity = struct {
     rot: Angle = Angle.zero,
 
     user_data: [256]u8 = undefined,
+    geometry: ?*zg.ResourceManager.Geometry = null,
 
     // private:
     behaviours: Behaviours = .{},
@@ -251,6 +172,19 @@ pub const Entity = struct {
         return ent.behaviours.detach(Behaviour);
     }
 };
+
+pub const View = struct {
+    pos: Vector3 = nullvector,
+    rot: Angle = Angle.zero,
+    arc: f32 = 60.0,
+
+    znear: f32 = 0.1,
+    zfar: f32 = 10_000.0,
+
+    viewport: zg.Rectangle = zg.Rectangle{ .x = 0, .y = 0, .width = 0, .height = 0 },
+};
+
+pub var camera: View = .{};
 
 pub const Key = zg.Input.Scancode;
 
@@ -319,6 +253,26 @@ pub const mouse = struct {
 //     //
 // };
 
+pub const mat = struct {
+    pub fn forAngle(ang: Angle) Matrix4 {
+        return zlm.Mat4.batchMul(&.{
+            zlm.Mat4.createAngleAxis(Vector3.unitY, ang.pan),
+            zlm.Mat4.createAngleAxis(Vector3.unitX, ang.tilt),
+            zlm.Mat4.createAngleAxis(Vector3.unitZ, ang.roll),
+        });
+    }
+};
+
+pub const vec = struct {
+    pub fn rotate(v: Vector3, ang: Angle) Vector3 {
+        return v.transformDirection(mat.forAngle(ang));
+    }
+};
+
+pub const screen = struct {
+    pub var color: zg.Color = .{ .r = 0, .g = 0, .b = 0x80 };
+};
+
 /// do not use this!
 /// it's meant for internal use of the engine
 pub const @"__implementation" = struct {
@@ -332,14 +286,19 @@ pub const @"__implementation" = struct {
     const Application = main;
     var quit_now = false;
 
-    fn core() *zg.CoreApplication {
-        return zg.CoreApplication.get();
-    }
+    var geometry_cache: std.StringHashMapUnmanaged(*zg.ResourceManager.Geometry) = .{};
 
     // pub var scheduler: Scheduler = undefined;
 
+    var last_frame_time: i64 = undefined;
+    var r2d: zg.Renderer2D = undefined;
+    var r3d: zg.Renderer3D = undefined;
+
     pub fn init(app: *Application) !void {
         app.* = .{};
+
+        r2d = try core().resources.createRenderer2D();
+        r3d = try core().resources.createRenderer3D();
 
         mem.backing = core().allocator;
         level.arena = std.heap.ArenaAllocator.init(mem.backing);
@@ -349,10 +308,16 @@ pub const @"__implementation" = struct {
 
         // Coroutine(game.main).start(.{});
         try game.main();
+
+        last_frame_time = zg.milliTimestamp();
     }
 
-    pub fn update(app: *Application) !bool {
-        _ = app;
+    pub fn update(_: *Application) !bool {
+        const timestamp = zg.milliTimestamp();
+        defer last_frame_time = timestamp;
+
+        time.total = @intToFloat(f32, timestamp) / 1000.0;
+        time.step = @intToFloat(f32, timestamp - last_frame_time) / 1000.0;
 
         key.pressed_keys = .{};
         key.released_keys = .{};
@@ -404,6 +369,11 @@ pub const @"__implementation" = struct {
             global_behaviours.updateAll({});
         }
 
+        // level update process
+        {
+            level.level_behaviours.updateAll({});
+        }
+
         // entity update process
         {
             var it = level.entities.first;
@@ -414,23 +384,127 @@ pub const @"__implementation" = struct {
             }
         }
 
-        // var index: usize = 0;
-        // while (index < 20) : (index += 1) {
-        //     scheduler.nextFrame();
-        // }
+        // schedule coroutines
+        {
+            // scheduler.nextFrame();
+        }
+
+        if (quit_now)
+            return false;
+
+        r2d.reset();
+        r3d.reset();
+
+        // render all entities
+        {
+            var it = level.entities.first;
+            while (it) |node| : (it = node.next) {
+                const ent: *Entity = &node.data;
+
+                if (ent.geometry) |geometry| {
+                    const mat_pos = zlm.Mat4.createTranslation(ent.pos);
+                    const mat_rot = mat.forAngle(ent.rot);
+                    const mat_scale = zlm.Mat4.createScale(ent.scale.x, ent.scale.y, ent.scale.z);
+
+                    const trafo = zlm.Mat4.batchMul(&.{
+                        mat_scale,
+                        mat_rot,
+                        mat_pos,
+                    });
+
+                    try r3d.drawGeometry(geometry, trafo.fields);
+                }
+            }
+        }
 
         return (quit_now == false);
     }
 
-    pub fn render(app: *Application) !void {
-        //
-        _ = app;
+    pub fn render(_: *Application) !void {
+        const gl = zg.gles;
+
+        gl.clearColor(
+            @intToFloat(f32, screen.color.r) / 255.0,
+            @intToFloat(f32, screen.color.g) / 255.0,
+            @intToFloat(f32, screen.color.b) / 255.0,
+            @intToFloat(f32, screen.color.a) / 255.0,
+        );
+        gl.clearDepthf(1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        const ss = core().screen_size;
+
+        const aspect = @intToFloat(f32, ss.width) / @intToFloat(f32, ss.height);
+
+        const camera_fwd = vec.rotate(vector(0, 0, -1), camera.rot);
+        const camera_up = vec.rotate(vector(0, 1, 0), camera.rot);
+
+        const projection_matrix = zlm.Mat4.createPerspective(
+            zlm.toRadians(camera.arc),
+            aspect,
+            camera.znear,
+            camera.zfar,
+        );
+        const view_matrix = zlm.Mat4.createLook(camera.pos, camera_fwd, camera_up);
+
+        const camera_view_proj = zlm.Mat4.batchMul(&.{
+            view_matrix,
+            projection_matrix,
+        });
+
+        r3d.render(camera_view_proj.fields);
+
+        r2d.render(ss);
     }
 
-    pub fn deinit(app: *Application) void {
-        _ = app;
+    pub fn deinit(_: *Application) void {
+        var iter = geometry_cache.keyIterator();
+        while (iter.next()) |file_name| {
+            mem.backing.free(file_name.*);
+        }
+
+        geometry_cache.deinit(mem.backing);
+    }
+
+    fn loadGeometry(path: []const u8) *zg.ResourceManager.Geometry {
+        const full_path = std.fs.cwd().realpathAlloc(mem.backing, path) catch |err| panic(err);
+        const gop = geometry_cache.getOrPut(mem.backing, full_path) catch oom();
+
+        if (gop.found_existing) {
+            mem.free(full_path);
+            return gop.value_ptr.*;
+        }
+
+        var file_data = std.fs.cwd().readFileAlloc(
+            mem.backing,
+            full_path,
+            1 << 30, // GB
+        ) catch |err| panic(err);
+
+        var spec = zg.ResourceManager.Z3DGeometry(null){
+            .data = file_data,
+        };
+
+        gop.value_ptr.* = core().resources.createGeometry(spec) catch |err| panic(err);
+
+        return gop.value_ptr.*;
     }
 };
+
+inline fn oom() noreturn {
+    @panic("out of memory");
+}
+
+inline fn panic(val: anytype) noreturn {
+    const T = @TypeOf(val);
+    if (T == []const u8)
+        @panic(val);
+    switch (@typeInfo(T)) {
+        .ErrorSet => if (val == error.OutOfMemory) oom() else std.debug.panic("unhandled error: {s}", .{@errorName(val)}),
+        .Enum => std.debug.panic("unhandled error: {s}", .{@tagName(val)}),
+        else => std.debug.panic("unhandled error: {any}", .{val}),
+    }
+}
 
 // Include when stage2 can async:
 
@@ -517,3 +591,119 @@ pub const @"__implementation" = struct {
 //         }
 //     };
 // }
+
+const BehaviourID = enum(usize) { _ };
+
+fn BehaviourSystem(comptime memory_module: type, comptime Context: type) type {
+    return struct {
+        const System = @This();
+
+        const Instance = struct {
+            update: std.meta.FnPtr(fn (context: Context, node: *Node) void),
+            id: BehaviourID,
+        };
+
+        pub const List = std.TailQueue(Instance);
+        pub const Node = List.Node;
+
+        list: List = .{},
+
+        pub fn attach(instance: *System, comptime Behaviour: type) *Behaviour {
+            if (instance.behaviour(Behaviour)) |oh_behave|
+                return oh_behave;
+
+            const Storage = BehaviourStorage(Behaviour);
+
+            const Updater = struct {
+                fn update(ctx: Context, node: *Node) void {
+                    if (!@hasDecl(Behaviour, "update"))
+                        return;
+                    const storage = @fieldParentPtr(Storage, "node", node);
+                    // void is used to differentiate between basic and context based update.
+                    // as void as a nonsensical value to pass, we can distinct on that.
+                    if (Context != void) {
+                        Behaviour.update(ctx, &storage.data);
+                    } else {
+                        Behaviour.update(&storage.data);
+                    }
+                }
+            };
+
+            const storage: *Storage = memory_module.create(Storage);
+            storage.* = Storage{
+                .node = .{
+                    .data = .{
+                        .id = Storage.id(),
+                        .update = Updater.update,
+                    },
+                },
+                .data = undefined,
+            };
+
+            if (@hasDecl(Storage, "init")) {
+                storage.data.init(instance, &storage.data);
+            } else {
+                // If no init function is present,
+                // we use a default initalization.
+                storage.data = Behaviour{};
+            }
+
+            instance.list.append(&storage.node);
+
+            return &storage.data;
+        }
+
+        pub fn behaviour(instance: *System, comptime Behaviour: type) ?*Behaviour {
+            const Storage = BehaviourStorage(Behaviour);
+
+            var it = instance.list.first;
+            while (it) |node| : (it = node.next) {
+                if (node.data.id == Storage.id()) {
+                    return &@fieldParentPtr(Storage, "node", node).data;
+                }
+            }
+            return null;
+        }
+
+        pub fn updateAll(instance: *System, context: Context) void {
+            var behave_it = instance.list.first;
+            while (behave_it) |behave_node| : (behave_it = behave_node.next) {
+                behave_node.data.update(context, behave_node);
+            }
+        }
+
+        pub fn detach(instance: *System, comptime Behaviour: type) void {
+            const Storage = BehaviourStorage(Behaviour);
+
+            var it = instance.list;
+            while (it) |node| : (it = node.next) {
+                if (node.data == Storage.id()) {
+                    instance.list.remove(node);
+
+                    const storage = @fieldParentPtr(Storage, "node", node);
+
+                    if (@hasDecl(Behaviour, "deinit")) {
+                        storage.data.deinit();
+                    }
+
+                    memory_module.destroy(storage);
+
+                    return;
+                }
+            }
+        }
+
+        fn BehaviourStorage(comptime Behaviour: type) type {
+            return struct {
+                var storage_id_buffer: u8 = 0;
+
+                pub inline fn id() BehaviourID {
+                    return @intToEnum(BehaviourID, @ptrToInt(&storage_id_buffer));
+                }
+
+                node: Node,
+                data: Behaviour,
+            };
+        }
+    };
+}

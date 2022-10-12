@@ -25,6 +25,7 @@ pub fn build(b: *std.build.Builder) void {
 
     const run_cmd = instance.run();
     run_cmd.step.dependOn(b.getInstallStep());
+    run_cmd.cwd = "demo";
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }

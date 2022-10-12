@@ -5,9 +5,12 @@ pub const engine_verification_export = eng;
 
 pub fn main() !void {
     eng.level.load("foo.wmb");
-    _ = eng.entity.create("player.mdl", eng.vector(0, 0, 0), Player);
 
     _ = eng.attach(GameLoop);
+
+    const player = eng.entity.create("cube.z3d", eng.vector(0, 0, -10), Player);
+
+    _ = player.attach(YBouncer);
 
     // var i: usize = 0;
     // while (i < 10) : (i += 1) {
@@ -37,5 +40,11 @@ const Player = struct {
     pub fn update(ent: *eng.Entity, p: *Player) void {
         _ = p;
         ent.rot.pan += eng.time.step;
+    }
+};
+
+const YBouncer = struct {
+    pub fn update(ent: *eng.Entity, _: *YBouncer) void {
+        ent.pos.y = 3.0 * @sin(eng.time.total);
     }
 };
