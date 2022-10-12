@@ -128,7 +128,7 @@ pub const entity = struct {
         };
 
         if (file) |actual_file_path| {
-            ent.data.geometry = @"__implementation".loadGeometry(actual_file_path);
+            ent.data.geometry = @"__implementation".loadGeometry(actual_file_path) orelse panic("file not found!");
         }
 
         if (Behaviour) |ActualBehaviour| {
@@ -256,9 +256,9 @@ pub const mouse = struct {
 pub const mat = struct {
     pub fn forAngle(ang: Angle) Matrix4 {
         return zlm.Mat4.batchMul(&.{
-            zlm.Mat4.createAngleAxis(Vector3.unitY, ang.pan),
-            zlm.Mat4.createAngleAxis(Vector3.unitX, ang.tilt),
-            zlm.Mat4.createAngleAxis(Vector3.unitZ, ang.roll),
+            zlm.Mat4.createAngleAxis(Vector3.unitZ, zlm.toRadians(ang.roll)),
+            zlm.Mat4.createAngleAxis(Vector3.unitX, zlm.toRadians(ang.tilt)),
+            zlm.Mat4.createAngleAxis(Vector3.unitY, zlm.toRadians(ang.pan)),
         });
     }
 };
@@ -266,6 +266,16 @@ pub const mat = struct {
 pub const vec = struct {
     pub fn rotate(v: Vector3, ang: Angle) Vector3 {
         return v.transformDirection(mat.forAngle(ang));
+    }
+
+    pub fn forAngle(ang: Angle) Vector3 {
+        const pan = zlm.toRadians(ang.pan);
+        const tilt = zlm.toRadians(ang.tilt);
+        return vector(
+            @sin(pan) * @cos(tilt),
+            -@sin(tilt),
+            -@cos(pan) * @cos(tilt),
+        );
     }
 };
 
@@ -287,6 +297,7 @@ pub const @"__implementation" = struct {
     var quit_now = false;
 
     var geometry_cache: std.StringHashMapUnmanaged(*zg.ResourceManager.Geometry) = .{};
+    var texture_cache: std.StringHashMapUnmanaged(*zg.ResourceManager.Texture) = .{};
 
     // pub var scheduler: Scheduler = undefined;
 
@@ -458,15 +469,51 @@ pub const @"__implementation" = struct {
     }
 
     pub fn deinit(_: *Application) void {
-        var iter = geometry_cache.keyIterator();
-        while (iter.next()) |file_name| {
-            mem.backing.free(file_name.*);
+        {
+            var iter = geometry_cache.keyIterator();
+            while (iter.next()) |file_name| {
+                mem.backing.free(file_name.*);
+            }
+        }
+        {
+            var iter = texture_cache.keyIterator();
+            while (iter.next()) |file_name| {
+                mem.backing.free(file_name.*);
+            }
         }
 
         geometry_cache.deinit(mem.backing);
+        texture_cache.deinit(mem.backing);
     }
 
-    fn loadGeometry(path: []const u8) *zg.ResourceManager.Geometry {
+    fn load3DTexture(path: []const u8) ?*zg.ResourceManager.Texture {
+        const full_path = std.fs.cwd().realpathAlloc(mem.backing, path) catch |err| panic(err);
+        const gop = texture_cache.getOrPut(mem.backing, full_path) catch oom();
+
+        if (gop.found_existing) {
+            mem.free(full_path);
+            return gop.value_ptr.*;
+        }
+
+        var file_data = std.fs.cwd().readFileAlloc(
+            mem.backing,
+            full_path,
+            1 << 30, // GB
+        ) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| panic(e),
+        };
+
+        var spec = zg.ResourceManager.DecodeImageData{
+            .data = file_data,
+        };
+
+        gop.value_ptr.* = core().resources.createTexture(.@"3d", spec) catch |err| panic(err);
+
+        return gop.value_ptr.*;
+    }
+
+    fn loadGeometry(path: []const u8) ?*zg.ResourceManager.Geometry {
         const full_path = std.fs.cwd().realpathAlloc(mem.backing, path) catch |err| panic(err);
         const gop = geometry_cache.getOrPut(mem.backing, full_path) catch oom();
 
@@ -479,10 +526,21 @@ pub const @"__implementation" = struct {
             mem.backing,
             full_path,
             1 << 30, // GB
-        ) catch |err| panic(err);
+        ) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| panic(e),
+        };
 
-        var spec = zg.ResourceManager.Z3DGeometry(null){
+        const TextureLoader = struct {
+            pub fn load(_: @This(), rm: *zg.ResourceManager, name: []const u8) !?*zg.ResourceManager.Texture {
+                std.debug.assert(&core().resources == rm);
+                return load3DTexture(name);
+            }
+        };
+
+        var spec = zg.ResourceManager.Z3DGeometry(TextureLoader){
             .data = file_data,
+            .loader = TextureLoader{},
         };
 
         gop.value_ptr.* = core().resources.createGeometry(spec) catch |err| panic(err);
