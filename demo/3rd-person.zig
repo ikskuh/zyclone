@@ -2,15 +2,14 @@ const std = @import("std");
 const eng = @import("basegame");
 
 pub fn main() !void {
-    eng.level.load("foo.wmb");
+    eng.level.load("levels/test.wmb");
 
     _ = eng.attach(eng.DefaultCamera);
 
-    _ = eng.entity.create("terrain.z3d", eng.nullvector, null);
+    // _ = eng.entity.create("terrain.z3d", eng.nullvector, null);
 
     const player = eng.entity.create("cube.z3d", eng.vector(0, 0, -10), Player);
     _ = player.attach(YBouncer);
-
 
     // var i: usize = 0;
     // while (i < 10) : (i += 1) {

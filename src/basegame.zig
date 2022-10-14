@@ -2,6 +2,7 @@ const std = @import("std");
 const zlm = @import("zlm");
 const zg = @import("zero-graphics");
 const main = @import("entrypoint.zig");
+const wmb = @import("wmb.zig");
 
 fn core() *zg.CoreApplication {
     return zg.CoreApplication.get();
@@ -78,6 +79,146 @@ pub const level = struct {
     var entities: std.TailQueue(Entity) = .{};
     var level_behaviours: BehaviourSystem(level, void) = .{};
 
+    const WmbTextureLoader = struct {
+        level: wmb.Level,
+        index: usize,
+
+        pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.TextureData {
+            const source: wmb.Texture = loader.level.textures[loader.index];
+
+            var data = zg.ResourceManager.TextureData{
+                .width = std.math.cast(u15, source.width) orelse return error.InvalidFormat,
+                .height = std.math.cast(u15, source.height) orelse return error.InvalidFormat,
+                .pixels = undefined,
+            };
+
+            const pixel_count = @as(usize, data.width) * @as(usize, data.height);
+
+            data.pixels = try rm.allocator.alloc(u8, 4 * pixel_count);
+            errdefer rm.allocator.free(data.pixels.?);
+
+            switch (source.format) {
+                .rgba_8888 => std.mem.copy(u8, data.pixels.?, source.data), // equal size
+                .rgb_888 => {
+                    var i: usize = 0;
+                    while (i < pixel_count) : (i += 1) {
+                        data.pixels.?[4 * i + 0] = source.data[3 * i + 0];
+                        data.pixels.?[4 * i + 1] = source.data[3 * i + 1];
+                        data.pixels.?[4 * i + 2] = source.data[3 * i + 2];
+                        data.pixels.?[4 * i + 3] = 0xFF;
+                    }
+                },
+                .rgb_565 => {
+                    var i: usize = 0;
+                    while (i < pixel_count) : (i += 1) {
+                        const Rgb = packed struct {
+                            r: u5,
+                            g: u6,
+                            b: u5,
+                        };
+                        const rgb = @bitCast(Rgb, source.data[2 * i ..][0..2].*);
+
+                        data.pixels.?[4 * i + 0] = (@as(u8, rgb.b) << 3) | (rgb.b >> 2);
+                        data.pixels.?[4 * i + 1] = (@as(u8, rgb.g) << 2) | (rgb.g >> 4);
+                        data.pixels.?[4 * i + 2] = (@as(u8, rgb.r) << 3) | (rgb.r >> 2);
+                        data.pixels.?[4 * i + 3] = 0xFF;
+                    }
+                },
+                .dds => return error.InvalidFormat,
+            }
+
+            return data;
+        }
+    };
+
+    const WmbGeometryLoader = struct {
+        level: wmb.Level,
+        block: wmb.Block,
+
+        pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.GeometryData {
+            const Vertex = zg.ResourceManager.Vertex;
+            const Mesh = zg.ResourceManager.Mesh;
+
+            const block = loader.block;
+
+            var data = zg.ResourceManager.GeometryData{
+                .vertices = undefined, // []Vertex,
+                .indices = undefined, // []u16,
+                .meshes = undefined, // []Mesh,
+            };
+
+            data.indices = try rm.allocator.alloc(u16, 3 * block.triangles.len);
+            errdefer rm.allocator.free(data.indices);
+
+            data.vertices = try rm.allocator.alloc(Vertex, block.vertices.len);
+            errdefer rm.allocator.free(data.vertices);
+
+            for (block.vertices) |src_vtx, i| {
+                data.vertices[i] = Vertex{
+                    .x = src_vtx.position.x,
+                    .y = src_vtx.position.y,
+                    .z = src_vtx.position.z,
+
+                    // TODO: Fill with correct data
+                    .nx = 0,
+                    .ny = 1,
+                    .nz = 0,
+
+                    .u = src_vtx.texture_coord.x,
+                    .v = src_vtx.texture_coord.y,
+                };
+            }
+
+            // pre-sort triangles so we can easily created
+            // meshes based on the texture alone.
+            std.sort.sort(wmb.Triangle, block.triangles, block, struct {
+                fn lt(ctx: wmb.Block, lhs: wmb.Triangle, rhs: wmb.Triangle) bool {
+                    const lhs_tex = ctx.skins[lhs.skin].texture;
+                    const rhs_tex = ctx.skins[rhs.skin].texture;
+                    return lhs_tex < rhs_tex;
+                }
+            }.lt);
+
+            var meshes = std.ArrayList(Mesh).init(rm.allocator);
+            defer meshes.deinit();
+
+            if (block.triangles.len > 0) {
+                var mesh: *Mesh = undefined;
+                var current_texture: u16 = ~@as(u16, 0);
+
+                for (block.triangles) |tris, i| {
+                    const tex_index = block.skins[tris.skin].texture;
+                    if (i == 0 or tex_index != current_texture) {
+                        current_texture = tex_index;
+
+                        var tex = rm.createTexture(.@"3d", WmbTextureLoader{
+                            .level = loader.level,
+                            .index = tex_index,
+                        }) catch |err| blk: {
+                            std.log.err("failed to decode texture: {s}", .{@errorName(err)});
+                            break :blk null;
+                        };
+
+                        mesh = try meshes.addOne();
+                        mesh.* = Mesh{
+                            .offset = i,
+                            .count = 0,
+                            .texture = tex,
+                        };
+                    }
+
+                    const indices = data.indices[3 * i ..][0..3];
+                    indices.* = tris.indices;
+
+                    mesh.count += 3;
+                }
+            }
+            data.meshes = meshes.toOwnedSlice();
+
+            return data;
+        }
+    };
+
     pub fn load(path: ?[]const u8) void {
         arena.deinit();
         arena = std.heap.ArenaAllocator.init(mem.backing);
@@ -85,7 +226,34 @@ pub const level = struct {
         level_behaviours = .{};
 
         if (path) |real_path| {
-            std.log.err("implement loading level file '{s}'", .{real_path});
+            var level_dir = std.fs.cwd().openDir(std.fs.path.dirname(real_path) orelse ".", .{}) catch |err| panic(err);
+            defer level_dir.close();
+
+            var level_file = level_dir.openFile(std.fs.path.basename(real_path), .{}) catch |err| panic(err);
+            defer level_file.close();
+
+            var level_source = std.io.StreamSource{ .file = level_file };
+
+            var level_data = wmb.load(
+                level.arena.allocator(),
+                &level_source,
+                .{
+                    .target_coordinate_system = .opengl,
+                    .scale = 1.0 / 16.0,
+                },
+            ) catch |err| panic(err);
+
+            for (level_data.blocks) |src_block| {
+                const geom = core().resources.createGeometry(WmbGeometryLoader{
+                    .level = level_data,
+                    .block = src_block,
+                }) catch |err| panic(err);
+
+                const ent = entity.create(null, nullvector, null);
+                ent.geometry = geom;
+            }
+
+            std.log.err("implement loading level file '{?}'", .{level_data.info});
         }
     }
 
