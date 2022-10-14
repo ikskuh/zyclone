@@ -22,6 +22,8 @@ pub const Angle = struct {
     roll: f32 = 0,
 };
 
+pub const Texture = zg.ResourceManager.Texture;
+
 /// Shuts down the engine
 pub fn exit() void {
     @"__implementation".quit_now = true;
@@ -79,6 +81,170 @@ pub const level = struct {
     var entities: std.TailQueue(Entity) = .{};
     var level_behaviours: BehaviourSystem(level, void) = .{};
 
+    /// Destroys all currently active entities, and provides a clean slate for 3D data.
+    /// If `path` is provided, will also load the render object as the root of the level.
+    /// Frees all memory allocated via the `level` abstraction.
+    pub fn load(path: ?[]const u8) void {
+        arena.deinit();
+        arena = std.heap.ArenaAllocator.init(mem.backing);
+        entities = .{};
+        level_behaviours = .{};
+
+        if (path) |real_path| {
+            var level_dir = std.fs.cwd().openDir(std.fs.path.dirname(real_path) orelse ".", .{}) catch |err| panic(err);
+            defer level_dir.close();
+
+            var level_file = level_dir.openFile(std.fs.path.basename(real_path), .{}) catch |err| panic(err);
+            defer level_file.close();
+
+            var level_source = std.io.StreamSource{ .file = level_file };
+
+            var level_data = wmb.load(
+                level.arena.allocator(),
+                &level_source,
+                .{
+                    .target_coordinate_system = .opengl,
+                    .scale = 1.0 / 16.0,
+                },
+            ) catch |err| panic(err);
+
+            var block_geometry = BlockGeometry.fromWmbData(arena.allocator(), level_data);
+
+            const ent = entity.create(null, nullvector, null);
+            ent.geometry = .{ .blocks = block_geometry };
+
+            std.log.err("TODO: implement creating additional objects from level file '{?}'", .{level_data.info});
+        }
+    }
+
+    pub fn create(comptime T: type) *T {
+        return arena.allocator().create(T) catch oom();
+    }
+
+    pub fn alloc(comptime T: type, count: usize) []T {
+        return arena.allocator().alloc(T, count) catch oom();
+    }
+
+    pub fn destroy(ptr: anytype) void {
+        arena.allocator().destroy(ptr);
+    }
+
+    pub fn free(ptr: anytype) void {
+        arena.allocator().free(ptr);
+    }
+
+    pub fn attach(comptime Behaviour: type) *Behaviour {
+        return level_behaviours.attach({}, Behaviour);
+    }
+
+    pub fn behaviour(comptime Behaviour: type) ?*Behaviour {
+        return level_behaviours.behaviour(Behaviour);
+    }
+
+    pub fn detach(comptime Behaviour: type) void {
+        return level_behaviours.detach(Behaviour);
+    }
+};
+
+pub const entity = struct {
+    pub fn create(file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
+        const ent = level.create(std.TailQueue(Entity).Node);
+        ent.* = .{
+            .data = Entity{
+                .pos = position,
+            },
+        };
+
+        if (file) |actual_file_path| {
+            ent.data.geometry = @"__implementation".loadRenderObject(std.fs.cwd(), actual_file_path) orelse panic("file not found!");
+        }
+
+        if (Behaviour) |ActualBehaviour| {
+            _ = ent.data.attach(ActualBehaviour);
+        }
+
+        level.entities.append(ent);
+
+        return &ent.data;
+    }
+};
+
+pub const Entity = struct {
+    const Behaviours = BehaviourSystem(level, *Entity);
+
+    // public:
+    pos: Vector3 = nullvector,
+    scale: Vector3 = zlm.Vec3.one,
+    rot: Angle = Angle.zero,
+
+    user_data: [256]u8 = undefined,
+
+    // visuals
+    geometry: ?RenderObject = null,
+    lightmap: ?*Texture = null,
+
+    // private:
+    behaviours: Behaviours = .{},
+
+    pub fn destroy(e: *Entity) void {
+        const node = @fieldParentPtr(std.TailQueue(Entity).Node, "data", e);
+        level.entities.remove(node);
+    }
+
+    pub fn attach(ent: *Entity, comptime Behaviour: type) *Behaviour {
+        return ent.behaviours.attach(ent, Behaviour);
+    }
+
+    pub fn behaviour(ent: *Entity, comptime Behaviour: type) ?*Behaviour {
+        return ent.behaviours.behaviour(Behaviour);
+    }
+
+    pub fn detach(ent: *Entity, comptime Behaviour: type) void {
+        return ent.behaviours.detach(Behaviour);
+    }
+};
+
+pub const RenderObjectType = enum {
+    model,
+    sprite,
+    blocks,
+};
+
+/// A render object is something that the engine can render.
+pub const RenderObject = union(RenderObjectType) {
+    /// A regular 3D model.
+    model: *zg.ResourceManager.Geometry,
+
+    /// A flat, camera-oriented billboard.
+    sprite: *Texture,
+
+    /// A level geometry constructed out of blocks.
+    blocks: BlockGeometry,
+};
+
+pub const BlockGeometry = struct {
+    geometries: []*zg.ResourceManager.Geometry,
+
+    fn fromWmbData(allocator: std.mem.Allocator, lvl: wmb.Level) BlockGeometry {
+        var texture_cache = TextureCache.init(allocator);
+        defer texture_cache.deinit();
+
+        var geoms = allocator.alloc(*zg.ResourceManager.Geometry, lvl.blocks.len) catch oom();
+        errdefer allocator.free(geoms);
+
+        for (lvl.blocks) |src_block, i| {
+            geoms[i] = core().resources.createGeometry(WmbGeometryLoader{
+                .level = lvl,
+                .block = src_block,
+                .textures = &texture_cache,
+            }) catch |err| panic(err);
+        }
+
+        return BlockGeometry{
+            .geometries = geoms,
+        };
+    }
+
     const WmbTextureLoader = struct {
         level: wmb.Level,
         index: usize,
@@ -131,17 +297,27 @@ pub const level = struct {
         }
     };
 
-    const TextureCache = std.AutoHashMap(u16, ?*zg.ResourceManager.Texture);
+    const TextureCache = std.AutoHashMap(u16, ?*Texture);
 
     const WmbGeometryLoader = struct {
+        const Vertex = zg.ResourceManager.Vertex;
+        const Mesh = zg.ResourceManager.Mesh;
+
         level: wmb.Level,
         block: wmb.Block,
         textures: *TextureCache,
 
-        pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.GeometryData {
-            const Vertex = zg.ResourceManager.Vertex;
-            const Mesh = zg.ResourceManager.Mesh;
+        fn vert2pos(v: Vertex) Vector3 {
+            return vector(v.x, v.y, v.z);
+        }
 
+        fn normal2vert(v: *Vertex, normal: Vector3) void {
+            v.nx = normal.x;
+            v.ny = normal.y;
+            v.nz = normal.z;
+        }
+
+        pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.GeometryData {
             const block = loader.block;
 
             var data = zg.ResourceManager.GeometryData{
@@ -217,6 +393,22 @@ pub const level = struct {
                     const indices = data.indices[3 * i ..][0..3];
                     indices.* = tris.indices;
 
+                    // TODO: Improve normal computation
+                    // very shitty normal computation code,
+                    // this one will just make "last face wins".
+                    const p0 = vert2pos(data.vertices[indices[0]]);
+                    const p1 = vert2pos(data.vertices[indices[1]]);
+                    const p2 = vert2pos(data.vertices[indices[2]]);
+
+                    var p10 = p1.sub(p0).normalize();
+                    var p20 = p2.sub(p0).normalize();
+
+                    var n = p20.cross(p10).normalize();
+
+                    normal2vert(&data.vertices[indices[0]], n);
+                    normal2vert(&data.vertices[indices[1]], n);
+                    normal2vert(&data.vertices[indices[2]], n);
+
                     mesh.count += 3;
                 }
             }
@@ -225,131 +417,6 @@ pub const level = struct {
             return data;
         }
     };
-
-    pub fn load(path: ?[]const u8) void {
-        arena.deinit();
-        arena = std.heap.ArenaAllocator.init(mem.backing);
-        entities = .{};
-        level_behaviours = .{};
-
-        if (path) |real_path| {
-            var level_dir = std.fs.cwd().openDir(std.fs.path.dirname(real_path) orelse ".", .{}) catch |err| panic(err);
-            defer level_dir.close();
-
-            var level_file = level_dir.openFile(std.fs.path.basename(real_path), .{}) catch |err| panic(err);
-            defer level_file.close();
-
-            var level_source = std.io.StreamSource{ .file = level_file };
-
-            var level_data = wmb.load(
-                level.arena.allocator(),
-                &level_source,
-                .{
-                    .target_coordinate_system = .opengl,
-                    .scale = 1.0 / 16.0,
-                },
-            ) catch |err| panic(err);
-
-            var texture_cache = TextureCache.init(arena.allocator());
-            defer texture_cache.deinit();
-
-            for (level_data.blocks) |src_block| {
-                const geom = core().resources.createGeometry(WmbGeometryLoader{
-                    .level = level_data,
-                    .block = src_block,
-                    .textures = &texture_cache,
-                }) catch |err| panic(err);
-
-                const ent = entity.create(null, nullvector, null);
-                ent.geometry = geom;
-            }
-
-            std.log.err("implement loading level file '{?}'", .{level_data.info});
-        }
-    }
-
-    pub fn create(comptime T: type) *T {
-        return arena.allocator().create(T) catch oom();
-    }
-
-    pub fn alloc(comptime T: type, count: usize) []T {
-        return arena.allocator().alloc(T, count) catch oom();
-    }
-
-    pub fn destroy(ptr: anytype) void {
-        arena.allocator().destroy(ptr);
-    }
-
-    pub fn free(ptr: anytype) void {
-        arena.allocator().free(ptr);
-    }
-
-    pub fn attach(comptime Behaviour: type) *Behaviour {
-        return level_behaviours.attach({}, Behaviour);
-    }
-
-    pub fn behaviour(comptime Behaviour: type) ?*Behaviour {
-        return level_behaviours.behaviour(Behaviour);
-    }
-
-    pub fn detach(comptime Behaviour: type) void {
-        return level_behaviours.detach(Behaviour);
-    }
-};
-
-pub const entity = struct {
-    pub fn create(file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
-        const ent = level.create(std.TailQueue(Entity).Node);
-        ent.* = .{
-            .data = Entity{
-                .pos = position,
-            },
-        };
-
-        if (file) |actual_file_path| {
-            ent.data.geometry = @"__implementation".loadGeometry(actual_file_path) orelse panic("file not found!");
-        }
-
-        if (Behaviour) |ActualBehaviour| {
-            _ = ent.data.attach(ActualBehaviour);
-        }
-
-        level.entities.append(ent);
-
-        return &ent.data;
-    }
-};
-
-pub const Entity = struct {
-    const Behaviours = BehaviourSystem(level, *Entity);
-
-    // public:
-    pos: Vector3 = nullvector,
-    scale: Vector3 = zlm.Vec3.one,
-    rot: Angle = Angle.zero,
-
-    user_data: [256]u8 = undefined,
-    geometry: ?*zg.ResourceManager.Geometry = null,
-
-    // private:
-    behaviours: Behaviours = .{},
-
-    pub fn destroy(e: *Entity) void {
-        const node = @fieldParentPtr(std.TailQueue(Entity).Node, "data", e);
-        level.entities.remove(node);
-    }
-
-    pub fn attach(ent: *Entity, comptime Behaviour: type) *Behaviour {
-        return ent.behaviours.attach(ent, Behaviour);
-    }
-
-    pub fn behaviour(ent: *Entity, comptime Behaviour: type) ?*Behaviour {
-        return ent.behaviours.behaviour(Behaviour);
-    }
-
-    pub fn detach(ent: *Entity, comptime Behaviour: type) void {
-        return ent.behaviours.detach(Behaviour);
-    }
 };
 
 pub const View = struct {
@@ -497,14 +564,14 @@ pub const DefaultCamera = struct {
         const fwd = vec.forAngle(camera.rot).scale(velocity * time.step);
         const left = vec.rotate(vector(1, 0, 0), camera.rot).scale(velocity * time.step);
 
-        if (key.held(.up) or (fps_mode and key.held(.w)))
+        if (key.held(.up) or key.held(.w))
             camera.pos = camera.pos.add(fwd);
-        if (key.held(.down) or (fps_mode and key.held(.s)))
+        if (key.held(.down) or key.held(.s))
             camera.pos = camera.pos.sub(fwd);
 
-        if (fps_mode and key.held(.a))
+        if (key.held(.a))
             camera.pos = camera.pos.add(left);
-        if (fps_mode and key.held(.d))
+        if (key.held(.d))
             camera.pos = camera.pos.sub(left);
     }
 };
@@ -517,8 +584,8 @@ pub const @"__implementation" = struct {
     const Application = main;
     var quit_now = false;
 
-    var geometry_cache: std.StringHashMapUnmanaged(*zg.ResourceManager.Geometry) = .{};
-    var texture_cache: std.StringHashMapUnmanaged(*zg.ResourceManager.Texture) = .{};
+    var geometry_cache: std.StringHashMapUnmanaged(RenderObject) = .{};
+    var texture_cache: std.StringHashMapUnmanaged(*Texture) = .{};
 
     // pub var scheduler: Scheduler = undefined;
 
@@ -633,7 +700,7 @@ pub const @"__implementation" = struct {
             while (it) |node| : (it = node.next) {
                 const ent: *Entity = &node.data;
 
-                if (ent.geometry) |geometry| {
+                if (ent.geometry) |render_object| {
                     const mat_pos = zlm.Mat4.createTranslation(ent.pos);
                     const mat_rot = mat.forAngle(ent.rot);
                     const mat_scale = zlm.Mat4.createScale(ent.scale.x, ent.scale.y, ent.scale.z);
@@ -644,7 +711,15 @@ pub const @"__implementation" = struct {
                         mat_pos,
                     });
 
-                    try r3d.drawGeometry(geometry, trafo.fields);
+                    switch (render_object) {
+                        .sprite => @panic("sprite not supported yet"),
+                        .model => |geometry| try r3d.drawGeometry(geometry, trafo.fields),
+                        .blocks => |blocks| {
+                            for (blocks.geometries) |geometry| {
+                                try r3d.drawGeometry(geometry, trafo.fields);
+                            }
+                        },
+                    }
                 }
             }
         }
@@ -707,8 +782,8 @@ pub const @"__implementation" = struct {
         texture_cache.deinit(mem.backing);
     }
 
-    fn load3DTexture(path: []const u8) ?*zg.ResourceManager.Texture {
-        const full_path = std.fs.cwd().realpathAlloc(mem.backing, path) catch |err| panic(err);
+    fn load3DTexture(dir: std.fs.Dir, path: []const u8) ?*Texture {
+        const full_path = dir.realpathAlloc(mem.backing, path) catch |err| panic(err);
         const gop = texture_cache.getOrPut(mem.backing, full_path) catch oom();
 
         if (gop.found_existing) {
@@ -716,7 +791,7 @@ pub const @"__implementation" = struct {
             return gop.value_ptr.*;
         }
 
-        var file_data = std.fs.cwd().readFileAlloc(
+        var file_data = dir.readFileAlloc(
             mem.backing,
             full_path,
             1 << 30, // GB
@@ -734,37 +809,86 @@ pub const @"__implementation" = struct {
         return gop.value_ptr.*;
     }
 
-    fn loadGeometry(path: []const u8) ?*zg.ResourceManager.Geometry {
-        const full_path = std.fs.cwd().realpathAlloc(mem.backing, path) catch |err| panic(err);
-        const gop = geometry_cache.getOrPut(mem.backing, full_path) catch oom();
+    fn loadRenderObject(dir: std.fs.Dir, path: []const u8) ?RenderObject {
+        const ext = std.fs.path.extension(path);
+        const extension_map = .{
+            .wmb = .blocks,
+            .z3d = .model,
+            .png = .sprite,
+            .qoi = .sprite,
+        };
 
+        const object_type: RenderObjectType = inline for (@typeInfo(@TypeOf(extension_map)).Struct.fields) |fld| {
+            if (std.mem.eql(u8, ext, "." ++ fld.name))
+                break @field(RenderObjectType, @tagName(@field(extension_map, fld.name)));
+        } else return null;
+
+        const full_path = dir.realpathAlloc(mem.backing, path) catch |err| panic(err);
+        const gop = geometry_cache.getOrPut(mem.backing, full_path) catch oom();
         if (gop.found_existing) {
             mem.free(full_path);
             return gop.value_ptr.*;
         }
 
-        var file_data = std.fs.cwd().readFileAlloc(
-            mem.backing,
-            full_path,
-            1 << 30, // GB
-        ) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => |e| panic(e),
+        gop.value_ptr.* = switch (object_type) {
+            .sprite => blk: {
+                const tex = load3DTexture(dir, path) orelse {
+                    std.debug.assert(geometry_cache.remove(full_path));
+                    return null;
+                };
+                break :blk .{ .sprite = tex };
+            },
+
+            .model => blk: {
+                var file_data = dir.readFileAlloc(
+                    mem.backing,
+                    full_path,
+                    1 << 30, // GB
+                ) catch |err| switch (err) {
+                    error.FileNotFound => return null,
+                    else => |e| panic(e),
+                };
+
+                const TextureLoader = struct {
+                    dir: std.fs.Dir,
+                    pub fn load(loader: @This(), rm: *zg.ResourceManager, name: []const u8) !?*Texture {
+                        std.debug.assert(&core().resources == rm);
+                        return load3DTexture(loader.dir, name);
+                    }
+                };
+
+                var spec = zg.ResourceManager.Z3DGeometry(TextureLoader){
+                    .data = file_data,
+                    .loader = TextureLoader{ .dir = dir },
+                };
+
+                break :blk .{ .model = core().resources.createGeometry(spec) catch |err| panic(err) };
+            },
+
+            .blocks => blk: {
+                var level_dir = dir.openDir(std.fs.path.dirname(path) orelse ".", .{}) catch |err| panic(err);
+                defer level_dir.close();
+
+                var level_file = level_dir.openFile(std.fs.path.basename(path), .{}) catch |err| panic(err);
+                defer level_file.close();
+
+                var level_source = std.io.StreamSource{ .file = level_file };
+
+                var level_data = wmb.load(
+                    level.arena.allocator(),
+                    &level_source,
+                    .{
+                        .target_coordinate_system = .opengl,
+                        .scale = 1.0 / 16.0,
+                    },
+                ) catch |err| panic(err);
+
+                break :blk .{ .blocks = BlockGeometry.fromWmbData(mem.backing, level_data) };
+            },
         };
 
-        const TextureLoader = struct {
-            pub fn load(_: @This(), rm: *zg.ResourceManager, name: []const u8) !?*zg.ResourceManager.Texture {
-                std.debug.assert(&core().resources == rm);
-                return load3DTexture(name);
-            }
-        };
-
-        var spec = zg.ResourceManager.Z3DGeometry(TextureLoader){
-            .data = file_data,
-            .loader = TextureLoader{},
-        };
-
-        gop.value_ptr.* = core().resources.createGeometry(spec) catch |err| panic(err);
+        // Make sure we've loaded the right thing
+        std.debug.assert(@as(RenderObjectType, gop.value_ptr.*) == object_type);
 
         return gop.value_ptr.*;
     }
