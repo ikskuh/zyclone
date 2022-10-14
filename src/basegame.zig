@@ -110,10 +110,26 @@ pub const level = struct {
 
             var block_geometry = BlockGeometry.fromWmbData(arena.allocator(), level_data);
 
+            // TODO: Implement setup of environment data
+            // TODO: Implement loading of lightmaps
+
+            // Create an entity that will be our "map"
             const ent = entity.create(null, nullvector, null);
             ent.geometry = .{ .blocks = block_geometry };
 
-            std.log.err("TODO: implement creating additional objects from level file '{?}'", .{level_data.info});
+            for (level_data.objects) |object| {
+                switch (object) {
+                    .position => std.log.err("TODO: Implement loading of position object.", .{}),
+                    .light => std.log.err("TODO: Implement loading of light object.", .{}),
+                    .sound => std.log.err("TODO: Implement loading of sound object.", .{}),
+                    .path => std.log.err("TODO: Implement loading of path object.", .{}),
+                    .entity => |entity_def| {
+                        _ = entity_def;
+                        std.log.err("TODO: Implement loading of entity object.", .{});
+                    },
+                    .region => std.log.err("TODO: Implement loading of region object.", .{}),
+                }
+            }
         }
     }
 
