@@ -131,9 +131,12 @@ pub const level = struct {
         }
     };
 
+    const TextureCache = std.AutoHashMap(u16, ?*zg.ResourceManager.Texture);
+
     const WmbGeometryLoader = struct {
         level: wmb.Level,
         block: wmb.Block,
+        textures: *TextureCache,
 
         pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.GeometryData {
             const Vertex = zg.ResourceManager.Vertex;
@@ -191,19 +194,23 @@ pub const level = struct {
                     if (i == 0 or tex_index != current_texture) {
                         current_texture = tex_index;
 
-                        var tex = rm.createTexture(.@"3d", WmbTextureLoader{
-                            .level = loader.level,
-                            .index = tex_index,
-                        }) catch |err| blk: {
-                            std.log.err("failed to decode texture: {s}", .{@errorName(err)});
-                            break :blk null;
-                        };
+                        const texture = try loader.textures.getOrPut(tex_index);
+
+                        if (!texture.found_existing) {
+                            texture.value_ptr.* = rm.createTexture(.@"3d", WmbTextureLoader{
+                                .level = loader.level,
+                                .index = tex_index,
+                            }) catch |err| blk: {
+                                std.log.err("failed to decode texture: {s}", .{@errorName(err)});
+                                break :blk null;
+                            };
+                        }
 
                         mesh = try meshes.addOne();
                         mesh.* = Mesh{
-                            .offset = i,
+                            .offset = 3 * i,
                             .count = 0,
-                            .texture = tex,
+                            .texture = texture.value_ptr.*,
                         };
                     }
 
@@ -243,10 +250,14 @@ pub const level = struct {
                 },
             ) catch |err| panic(err);
 
+            var texture_cache = TextureCache.init(arena.allocator());
+            defer texture_cache.deinit();
+
             for (level_data.blocks) |src_block| {
                 const geom = core().resources.createGeometry(WmbGeometryLoader{
                     .level = level_data,
                     .block = src_block,
+                    .textures = &texture_cache,
                 }) catch |err| panic(err);
 
                 const ent = entity.create(null, nullvector, null);

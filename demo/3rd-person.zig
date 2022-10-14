@@ -2,7 +2,7 @@ const std = @import("std");
 const eng = @import("basegame");
 
 pub fn main() !void {
-    eng.level.load("levels/test.wmb");
+    eng.level.load("levels/future.wmb");
 
     _ = eng.attach(eng.DefaultCamera);
 

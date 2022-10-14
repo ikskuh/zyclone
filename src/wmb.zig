@@ -32,7 +32,7 @@ pub const CoordinateSystem = enum {
     opengl,
 
     pub fn fromGamestudio(cs: CoordinateSystem, vec: Vector3) Vector3 {
-        const tmp = switch (cs) {
+        return switch (cs) {
             .keep => vec,
             .gamestudio => vec,
             .opengl => Vector3{
@@ -41,12 +41,6 @@ pub const CoordinateSystem = enum {
                 .z = -vec.x, // back
             },
         };
-        // std.debug.print("transform via {}: {} => {}\n", .{
-        //     cs,
-        //     vec,
-        //     tmp,
-        // });
-        return tmp;
     }
 };
 
