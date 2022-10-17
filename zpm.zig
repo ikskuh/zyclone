@@ -4,6 +4,10 @@
 const std = @import("std");
 
 pub const pkgs = struct {
+    pub const libgamestudio = std.build.Pkg{
+        .name = "libgamestudio",
+        .source = .{ .path = "vendor/libgamestudio/src/main.zig" },
+    };
     pub const zlm = std.build.Pkg{
         .name = "zlm",
         .source = .{ .path = "vendor/zlm/zlm.zig" },

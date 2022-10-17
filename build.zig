@@ -11,6 +11,7 @@ pub fn build(b: *std.build.Builder) void {
     app.setBuildMode(mode);
 
     app.addPackage(zpm.pkgs.zlm);
+    app.addPackage(zpm.pkgs.libgamestudio);
     app.addPackage(std.build.Pkg{
         .name = "@GAME@",
         .source = .{ .path = "demo/3rd-person.zig" },

@@ -2,7 +2,8 @@ const std = @import("std");
 const zlm = @import("zlm");
 const zg = @import("zero-graphics");
 const main = @import("entrypoint.zig");
-const wmb = @import("wmb.zig");
+const gamestudio = @import("libgamestudio");
+const game = @import("@GAME@");
 
 fn core() *zg.CoreApplication {
     return zg.CoreApplication.get();
@@ -81,6 +82,10 @@ pub const level = struct {
     var entities: std.TailQueue(Entity) = .{};
     var level_behaviours: BehaviourSystem(level, void) = .{};
 
+    fn wmb2vec(v: gamestudio.Vector3) Vector3 {
+        return vector(v.x, v.y, v.z);
+    }
+
     /// Destroys all currently active entities, and provides a clean slate for 3D data.
     /// If `path` is provided, will also load the render object as the root of the level.
     /// Frees all memory allocated via the `level` abstraction.
@@ -99,7 +104,7 @@ pub const level = struct {
 
             var level_source = std.io.StreamSource{ .file = level_file };
 
-            var level_data = wmb.load(
+            var level_data = gamestudio.wmb.load(
                 level.arena.allocator(),
                 &level_source,
                 .{
@@ -111,21 +116,64 @@ pub const level = struct {
             var block_geometry = BlockGeometry.fromWmbData(arena.allocator(), level_data);
 
             // TODO: Implement setup of environment data
-            // TODO: Implement loading of lightmaps
 
             // Create an entity that will be our "map"
-            const ent = entity.create(null, nullvector, null);
-            ent.geometry = .{ .blocks = block_geometry };
 
-            for (level_data.objects) |object| {
+            const map_ent = entity.create(null, nullvector, null);
+            map_ent.geometry = .{ .blocks = block_geometry };
+
+            for (level_data.objects) |object, oid| {
                 switch (object) {
                     .position => std.log.err("TODO: Implement loading of position object.", .{}),
                     .light => std.log.err("TODO: Implement loading of light object.", .{}),
                     .sound => std.log.err("TODO: Implement loading of sound object.", .{}),
                     .path => std.log.err("TODO: Implement loading of path object.", .{}),
-                    .entity => |entity_def| {
-                        _ = entity_def;
-                        std.log.err("TODO: Implement loading of entity object.", .{});
+                    .entity => |def| {
+                        const ent = entity.createAt(level_dir, def.file_name.get(), wmb2vec(def.origin), null);
+                        ent.rot = Angle{ .pan = def.angle.pan, .tilt = def.angle.tilt, .roll = def.angle.roll };
+                        ent.scale = wmb2vec(def.scale);
+                        ent.skills = def.skills;
+
+                        // Load terrain lightmap if possible
+                        {
+                            const maybe_lm: ?gamestudio.wmb.LightMap = for (level_data.terrain_light_maps) |lm| {
+                                const oid_ref = lm.object orelse continue;
+                                if (oid_ref == oid) break lm;
+                            } else null;
+
+                            if (maybe_lm) |lm| {
+                                ent.lightmap = core().resources.createTexture(
+                                    .@"3d",
+                                    WmbLightmapLoader{ .lightmap = lm },
+                                ) catch |err| panic(err);
+                            }
+                        }
+
+                        // TODO: Copy more properties over
+                        // - name
+                        // - flags
+                        // - ambient
+                        // - albedo
+                        // - path
+                        // - attached_entity
+                        // - material
+                        // - string1
+                        // - string2
+
+                        // Attach behaviours
+                        if (@hasDecl(game, "actions")) {
+                            var iter = std.mem.tokenize(u8, def.action.get(), ", ");
+                            while (iter.next()) |action_name| {
+                                _ = action_name;
+
+                                //
+                            }
+                        } else if (def.action.len() > 0) {
+                            std.log.err("Entity '{s}' has an action '{s}', but there's no global action list available.", .{
+                                def.name.get(),
+                                def.action.get(),
+                            });
+                        }
                     },
                     .region => std.log.err("TODO: Implement loading of region object.", .{}),
                 }
@@ -164,6 +212,10 @@ pub const level = struct {
 
 pub const entity = struct {
     pub fn create(file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
+        return createAt(std.fs.cwd(), file, position, Behaviour);
+    }
+
+    pub fn createAt(folder: std.fs.Dir, file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
         const ent = level.create(std.TailQueue(Entity).Node);
         ent.* = .{
             .data = Entity{
@@ -172,7 +224,11 @@ pub const entity = struct {
         };
 
         if (file) |actual_file_path| {
-            ent.data.geometry = @"__implementation".loadRenderObject(std.fs.cwd(), actual_file_path) orelse panic("file not found!");
+            if (@"__implementation".loadRenderObject(folder, actual_file_path)) |geom| {
+                ent.data.geometry = geom;
+            } else {
+                std.log.err("could not find entity '{s}'", .{actual_file_path});
+            }
         }
 
         if (Behaviour) |ActualBehaviour| {
@@ -193,7 +249,8 @@ pub const Entity = struct {
     scale: Vector3 = zlm.Vec3.one,
     rot: Angle = Angle.zero,
 
-    user_data: [256]u8 = undefined,
+    user_data: [256]u8 = std.mem.zeroes([256]u8),
+    skills: [20]f32 = std.mem.zeroes([20]f32),
 
     // visuals
     geometry: ?RenderObject = null,
@@ -224,6 +281,7 @@ pub const RenderObjectType = enum {
     model,
     sprite,
     blocks,
+    terrain,
 };
 
 /// A render object is something that the engine can render.
@@ -236,12 +294,21 @@ pub const RenderObject = union(RenderObjectType) {
 
     /// A level geometry constructed out of blocks.
     blocks: BlockGeometry,
+
+    /// A heightmap geometry
+    terrain: Terrain,
+};
+
+pub const Terrain = struct {
+    // TODO
 };
 
 pub const BlockGeometry = struct {
     geometries: []*zg.ResourceManager.Geometry,
 
-    fn fromWmbData(allocator: std.mem.Allocator, lvl: wmb.Level) BlockGeometry {
+    fn fromWmbData(allocator: std.mem.Allocator, lvl: gamestudio.wmb.Level) BlockGeometry {
+        // TODO: Implement loading of lightmaps
+
         var texture_cache = TextureCache.init(allocator);
         defer texture_cache.deinit();
 
@@ -260,179 +327,6 @@ pub const BlockGeometry = struct {
             .geometries = geoms,
         };
     }
-
-    const WmbTextureLoader = struct {
-        level: wmb.Level,
-        index: usize,
-
-        pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.TextureData {
-            const source: wmb.Texture = loader.level.textures[loader.index];
-
-            var data = zg.ResourceManager.TextureData{
-                .width = std.math.cast(u15, source.width) orelse return error.InvalidFormat,
-                .height = std.math.cast(u15, source.height) orelse return error.InvalidFormat,
-                .pixels = undefined,
-            };
-
-            const pixel_count = @as(usize, data.width) * @as(usize, data.height);
-
-            data.pixels = try rm.allocator.alloc(u8, 4 * pixel_count);
-            errdefer rm.allocator.free(data.pixels.?);
-
-            switch (source.format) {
-                .rgba_8888 => std.mem.copy(u8, data.pixels.?, source.data), // equal size
-                .rgb_888 => {
-                    var i: usize = 0;
-                    while (i < pixel_count) : (i += 1) {
-                        data.pixels.?[4 * i + 0] = source.data[3 * i + 0];
-                        data.pixels.?[4 * i + 1] = source.data[3 * i + 1];
-                        data.pixels.?[4 * i + 2] = source.data[3 * i + 2];
-                        data.pixels.?[4 * i + 3] = 0xFF;
-                    }
-                },
-                .rgb_565 => {
-                    var i: usize = 0;
-                    while (i < pixel_count) : (i += 1) {
-                        const Rgb = packed struct {
-                            r: u5,
-                            g: u6,
-                            b: u5,
-                        };
-                        const rgb = @bitCast(Rgb, source.data[2 * i ..][0..2].*);
-
-                        data.pixels.?[4 * i + 0] = (@as(u8, rgb.b) << 3) | (rgb.b >> 2);
-                        data.pixels.?[4 * i + 1] = (@as(u8, rgb.g) << 2) | (rgb.g >> 4);
-                        data.pixels.?[4 * i + 2] = (@as(u8, rgb.r) << 3) | (rgb.r >> 2);
-                        data.pixels.?[4 * i + 3] = 0xFF;
-                    }
-                },
-                .dds => return error.InvalidFormat,
-            }
-
-            return data;
-        }
-    };
-
-    const TextureCache = std.AutoHashMap(u16, ?*Texture);
-
-    const WmbGeometryLoader = struct {
-        const Vertex = zg.ResourceManager.Vertex;
-        const Mesh = zg.ResourceManager.Mesh;
-
-        level: wmb.Level,
-        block: wmb.Block,
-        textures: *TextureCache,
-
-        fn vert2pos(v: Vertex) Vector3 {
-            return vector(v.x, v.y, v.z);
-        }
-
-        fn normal2vert(v: *Vertex, normal: Vector3) void {
-            v.nx = normal.x;
-            v.ny = normal.y;
-            v.nz = normal.z;
-        }
-
-        pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.GeometryData {
-            const block = loader.block;
-
-            var data = zg.ResourceManager.GeometryData{
-                .vertices = undefined, // []Vertex,
-                .indices = undefined, // []u16,
-                .meshes = undefined, // []Mesh,
-            };
-
-            data.indices = try rm.allocator.alloc(u16, 3 * block.triangles.len);
-            errdefer rm.allocator.free(data.indices);
-
-            data.vertices = try rm.allocator.alloc(Vertex, block.vertices.len);
-            errdefer rm.allocator.free(data.vertices);
-
-            for (block.vertices) |src_vtx, i| {
-                data.vertices[i] = Vertex{
-                    .x = src_vtx.position.x,
-                    .y = src_vtx.position.y,
-                    .z = src_vtx.position.z,
-
-                    // TODO: Fill with correct data
-                    .nx = 0,
-                    .ny = 1,
-                    .nz = 0,
-
-                    .u = src_vtx.texture_coord.x,
-                    .v = src_vtx.texture_coord.y,
-                };
-            }
-
-            // pre-sort triangles so we can easily created
-            // meshes based on the texture alone.
-            std.sort.sort(wmb.Triangle, block.triangles, block, struct {
-                fn lt(ctx: wmb.Block, lhs: wmb.Triangle, rhs: wmb.Triangle) bool {
-                    const lhs_tex = ctx.skins[lhs.skin].texture;
-                    const rhs_tex = ctx.skins[rhs.skin].texture;
-                    return lhs_tex < rhs_tex;
-                }
-            }.lt);
-
-            var meshes = std.ArrayList(Mesh).init(rm.allocator);
-            defer meshes.deinit();
-
-            if (block.triangles.len > 0) {
-                var mesh: *Mesh = undefined;
-                var current_texture: u16 = ~@as(u16, 0);
-
-                for (block.triangles) |tris, i| {
-                    const tex_index = block.skins[tris.skin].texture;
-                    if (i == 0 or tex_index != current_texture) {
-                        current_texture = tex_index;
-
-                        const texture = try loader.textures.getOrPut(tex_index);
-
-                        if (!texture.found_existing) {
-                            texture.value_ptr.* = rm.createTexture(.@"3d", WmbTextureLoader{
-                                .level = loader.level,
-                                .index = tex_index,
-                            }) catch |err| blk: {
-                                std.log.err("failed to decode texture: {s}", .{@errorName(err)});
-                                break :blk null;
-                            };
-                        }
-
-                        mesh = try meshes.addOne();
-                        mesh.* = Mesh{
-                            .offset = 3 * i,
-                            .count = 0,
-                            .texture = texture.value_ptr.*,
-                        };
-                    }
-
-                    const indices = data.indices[3 * i ..][0..3];
-                    indices.* = tris.indices;
-
-                    // TODO: Improve normal computation
-                    // very shitty normal computation code,
-                    // this one will just make "last face wins".
-                    const p0 = vert2pos(data.vertices[indices[0]]);
-                    const p1 = vert2pos(data.vertices[indices[1]]);
-                    const p2 = vert2pos(data.vertices[indices[2]]);
-
-                    var p10 = p1.sub(p0).normalize();
-                    var p20 = p2.sub(p0).normalize();
-
-                    var n = p20.cross(p10).normalize();
-
-                    normal2vert(&data.vertices[indices[0]], n);
-                    normal2vert(&data.vertices[indices[1]], n);
-                    normal2vert(&data.vertices[indices[2]], n);
-
-                    mesh.count += 3;
-                }
-            }
-            data.meshes = meshes.toOwnedSlice();
-
-            return data;
-        }
-    };
 };
 
 pub const View = struct {
@@ -559,9 +453,9 @@ pub const DefaultCamera = struct {
         const fps_mode = mouse.held(.secondary);
 
         const velocity: f32 = if (key.held(.shift_left))
-            10.0
+            45.0
         else
-            2.5;
+            10.0;
 
         if (key.held(.left))
             camera.rot.pan += 90 * time.step;
@@ -595,8 +489,6 @@ pub const DefaultCamera = struct {
 /// do not use this!
 /// it's meant for internal use of the engine
 pub const @"__implementation" = struct {
-    const game = @import("@GAME@");
-
     const Application = main;
     var quit_now = false;
 
@@ -728,13 +620,18 @@ pub const @"__implementation" = struct {
                     });
 
                     switch (render_object) {
-                        .sprite => @panic("sprite not supported yet"),
+                        .sprite => |texture| {
+                            try r3d.drawSprite(texture, trafo.fields);
+
+                            // @panic("sprite not supported yet");
+                        },
                         .model => |geometry| try r3d.drawGeometry(geometry, trafo.fields),
                         .blocks => |blocks| {
                             for (blocks.geometries) |geometry| {
                                 try r3d.drawGeometry(geometry, trafo.fields);
                             }
                         },
+                        .terrain => @panic("terrain not supported yet"),
                     }
                 }
             }
@@ -812,7 +709,10 @@ pub const @"__implementation" = struct {
             full_path,
             1 << 30, // GB
         ) catch |err| switch (err) {
-            error.FileNotFound => return null,
+            error.FileNotFound => {
+                std.log.err("could not find texture file '{s}'", .{full_path});
+                return null;
+            },
             else => |e| panic(e),
         };
 
@@ -829,17 +729,32 @@ pub const @"__implementation" = struct {
         const ext = std.fs.path.extension(path);
         const extension_map = .{
             .wmb = .blocks,
+
             .z3d = .model,
+            .mdl = .model,
+
             .png = .sprite,
             .qoi = .sprite,
+            .tga = .sprite,
+
+            .hmp = .terrain,
         };
 
         const object_type: RenderObjectType = inline for (@typeInfo(@TypeOf(extension_map)).Struct.fields) |fld| {
             if (std.mem.eql(u8, ext, "." ++ fld.name))
                 break @field(RenderObjectType, @tagName(@field(extension_map, fld.name)));
-        } else return null;
+        } else {
+            std.log.warn("tried to load unsupported file '{s}'", .{path});
+            return null;
+        };
 
-        const full_path = dir.realpathAlloc(mem.backing, path) catch |err| panic(err);
+        const full_path = dir.realpathAlloc(mem.backing, path) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.log.err("could not find file '{s}'", .{path});
+                return null;
+            },
+            else => |e| panic(e),
+        };
         const gop = geometry_cache.getOrPut(mem.backing, full_path) catch oom();
         if (gop.found_existing) {
             mem.free(full_path);
@@ -856,29 +771,83 @@ pub const @"__implementation" = struct {
             },
 
             .model => blk: {
-                var file_data = dir.readFileAlloc(
-                    mem.backing,
-                    full_path,
-                    1 << 30, // GB
-                ) catch |err| switch (err) {
-                    error.FileNotFound => return null,
-                    else => |e| panic(e),
-                };
+                if (std.mem.eql(u8, ext, ".mdl")) {
+                    // const TextureLoader = struct {
+                    //     dir: std.fs.Dir,
+                    //     pub fn load(loader: @This(), rm: *zg.ResourceManager, name: []const u8) !?*Texture {
+                    //         std.debug.assert(&core().resources == rm);
+                    //         if (std.mem.startsWith(u8, name, "*")) {
+                    //             // TODO: Implement internal texture loading ("*0")
+                    //             std.log.err("TODO: Implement internal texture loading for texture {s}", .{name});
+                    //             return null;
+                    //         }
+                    //         return load3DTexture(loader.dir, name);
+                    //     }
+                    // };
 
-                const TextureLoader = struct {
-                    dir: std.fs.Dir,
-                    pub fn load(loader: @This(), rm: *zg.ResourceManager, name: []const u8) !?*Texture {
-                        std.debug.assert(&core().resources == rm);
-                        return load3DTexture(loader.dir, name);
-                    }
-                };
+                    var file = dir.openFile(full_path, .{}) catch |err| switch (err) {
+                        error.FileNotFound => {
+                            std.debug.assert(geometry_cache.remove(full_path));
+                            return null;
+                        },
+                        else => |e| panic(e),
+                    };
+                    defer file.close();
 
-                var spec = zg.ResourceManager.Z3DGeometry(TextureLoader){
-                    .data = file_data,
-                    .loader = TextureLoader{ .dir = dir },
-                };
+                    var source = std.io.StreamSource{ .file = file };
 
-                break :blk .{ .model = core().resources.createGeometry(spec) catch |err| panic(err) };
+                    var mdl_data = gamestudio.mdl.load(
+                        mem.backing,
+                        &source,
+                        .{
+                            .target_coordinate_system = .opengl,
+                            // .scale = 1.0 / 16.0, // don't scale models, they will be automatically scaled down in the level loader if necessary
+                        },
+                    ) catch |err| {
+                        std.log.err("failed to load level file '{s}': {s}", .{
+                            path,
+                            @errorName(err),
+                        });
+                        std.debug.assert(geometry_cache.remove(full_path));
+                        return null;
+                    };
+
+                    var spec = MdlGeometryLoader{
+                        .mdl = mdl_data,
+                        // .loader = TextureLoader{ .dir = dir },
+                    };
+
+                    break :blk .{ .model = core().resources.createGeometry(spec) catch |err| panic(err) };
+                } else {
+                    var file_data = dir.readFileAlloc(
+                        mem.backing,
+                        full_path,
+                        1 << 30, // GB
+                    ) catch |err| switch (err) {
+                        error.FileNotFound => return null,
+                        else => |e| panic(e),
+                    };
+
+                    const TextureLoader = struct {
+                        dir: std.fs.Dir,
+                        pub fn load(loader: @This(), rm: *zg.ResourceManager, name: []const u8) !?*Texture {
+                            std.debug.assert(&core().resources == rm);
+                            if (std.mem.startsWith(u8, name, "*")) {
+                                // TODO: Implement internal texture loading ("*0")
+                                std.log.err("TODO: Implement internal texture loading for texture {s}", .{name});
+                                return null;
+                            }
+                            return load3DTexture(loader.dir, name);
+                        }
+                    };
+
+                    var spec = zg.ResourceManager.Z3DGeometry(TextureLoader){
+                        .data = file_data,
+                        .loader = TextureLoader{ .dir = dir },
+                    };
+
+                    break :blk .{ .model = core().resources.createGeometry(spec) catch |err| panic(err) };
+                }
             },
 
             .blocks => blk: {
@@ -890,16 +859,27 @@ pub const @"__implementation" = struct {
 
                 var level_source = std.io.StreamSource{ .file = level_file };
 
-                var level_data = wmb.load(
+                var level_data = gamestudio.wmb.load(
                     level.arena.allocator(),
                     &level_source,
                     .{
                         .target_coordinate_system = .opengl,
                         .scale = 1.0 / 16.0,
                     },
-                ) catch |err| panic(err);
+                ) catch |err| {
+                    std.log.err("failed to load level file '{s}': {s}", .{
+                        path,
+                        @errorName(err),
+                    });
+                    std.debug.assert(geometry_cache.remove(full_path));
+                    return null;
+                };
 
                 break :blk .{ .blocks = BlockGeometry.fromWmbData(mem.backing, level_data) };
+            },
+
+            .terrain => {
+                @panic("terrain loading not implemented yet!");
             },
         };
 
@@ -910,16 +890,343 @@ pub const @"__implementation" = struct {
     }
 };
 
-inline fn oom() noreturn {
+const AcknexTextureLoader = struct {
+    pub fn create(width: usize, height: usize, format: gamestudio.TextureFormat, src_data: []const u8, rm: *zg.ResourceManager) zg.ResourceManager.CreateResourceDataError!zg.ResourceManager.TextureData {
+        var data = zg.ResourceManager.TextureData{
+            .width = std.math.cast(u15, width) orelse return error.InvalidFormat,
+            .height = std.math.cast(u15, height) orelse return error.InvalidFormat,
+            .pixels = undefined,
+        };
+
+        const pixel_count = @as(usize, width) * @as(usize, height);
+
+        const pixels = try rm.allocator.alloc(u8, 4 * pixel_count);
+        errdefer rm.allocator.free(pixels);
+
+        data.pixels = pixels;
+
+        switch (format) {
+            .rgba8888 => std.mem.copy(u8, data.pixels.?, src_data), // equal size
+
+            .rgb888 => {
+                var i: usize = 0;
+                while (i < pixel_count) : (i += 1) {
+                    pixels[4 * i + 0] = src_data[3 * i + 0];
+                    pixels[4 * i + 1] = src_data[3 * i + 1];
+                    pixels[4 * i + 2] = src_data[3 * i + 2];
+                    pixels[4 * i + 3] = 0xFF;
+                }
+            },
+
+            .rgb565 => {
+                var i: usize = 0;
+                while (i < pixel_count) : (i += 1) {
+                    const Rgb = packed struct {
+                        r: u5,
+                        g: u6,
+                        b: u5,
+                    };
+                    const rgb = @bitCast(Rgb, src_data[2 * i ..][0..2].*);
+
+                    pixels[4 * i + 0] = (@as(u8, rgb.b) << 3) | (rgb.b >> 2);
+                    pixels[4 * i + 1] = (@as(u8, rgb.g) << 2) | (rgb.g >> 4);
+                    pixels[4 * i + 2] = (@as(u8, rgb.r) << 3) | (rgb.r >> 2);
+                    pixels[4 * i + 3] = 0xFF;
+                }
+            },
+
+            .rgb4444 => {
+                var i: usize = 0;
+                while (i < pixel_count) : (i += 1) {
+                    const Rgba = packed struct {
+                        r: u4,
+                        g: u4,
+                        b: u4,
+                        a: u4,
+                    };
+                    const rgba = @bitCast(Rgba, src_data[2 * i ..][0..2].*);
+                    pixels[4 * i + 0] = (@as(u8, rgba.b) << 4) | rgba.b;
+                    pixels[4 * i + 1] = (@as(u8, rgba.g) << 4) | rgba.g;
+                    pixels[4 * i + 2] = (@as(u8, rgba.r) << 4) | rgba.r;
+                    pixels[4 * i + 3] = (@as(u8, rgba.a) << 4) | rgba.a;
+                }
+            },
+
+            .pal256, .dds => return error.InvalidFormat,
+        }
+
+        return data;
+    }
+};
+
+const MdlTextureLoader = struct {
+    skin: gamestudio.mdl.Skin,
+
+    pub fn create(self: @This(), rm: *zg.ResourceManager) zg.ResourceManager.CreateResourceDataError!zg.ResourceManager.TextureData {
+        var skin: gamestudio.mdl.Skin = self.skin;
+        return try AcknexTextureLoader.create(skin.width, skin.height, skin.format, skin.data, rm);
+    }
+};
+
+const WmbTextureLoader = struct {
+    level: gamestudio.wmb.Level,
+    index: usize,
+
+    pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.TextureData {
+        const source: gamestudio.wmb.Texture = loader.level.textures[loader.index];
+        return AcknexTextureLoader.create(source.width, source.height, source.format, source.data, rm);
+    }
+};
+
+const MdlGeometryLoader = struct {
+    const Vertex = zg.ResourceManager.Vertex;
+    const Mesh = zg.ResourceManager.Mesh;
+
+    mdl: gamestudio.mdl.Model,
+    frame: usize = 0,
+
+    pub fn create(self: @This(), rm: *zg.ResourceManager) zg.ResourceManager.CreateResourceDataError!zg.ResourceManager.GeometryData {
+        const mdl: gamestudio.mdl.Model = self.mdl;
+
+        var vertices = std.ArrayList(Vertex).init(rm.allocator);
+        defer vertices.deinit();
+        var indices = std.ArrayList(u16).init(rm.allocator);
+        defer indices.deinit();
+        var meshes = std.ArrayList(Mesh).init(rm.allocator);
+        defer meshes.deinit();
+
+        const frame = mdl.frames[self.frame];
+        const skin = mdl.skins[0]; // TODO: check for correct skin!
+
+        const texture = try rm.createTexture(.@"3d", MdlTextureLoader{
+            .skin = skin,
+        });
+
+        try indices.ensureTotalCapacity(3 * mdl.triangles.len);
+        try vertices.ensureTotalCapacity(frame.vertices.len); // rough estimate
+
+        for (mdl.triangles) |tris| {
+            var i: usize = 0;
+            while (i < 3) : (i += 1) {
+                const uv = mdl.skin_vertices[tris.indices_uv[i]];
+                const vtx = frame.vertices[tris.indices_3d[i]];
+
+                var vertex = Vertex{
+                    .x = vtx.position.x,
+                    .y = vtx.position.y,
+                    .z = vtx.position.z,
+                    .nx = vtx.normal.x,
+                    .ny = vtx.normal.y,
+                    .nz = vtx.normal.z,
+                    .u = @intToFloat(f32, uv.u) / @intToFloat(f32, skin.width - 1),
+                    .v = @intToFloat(f32, uv.v) / @intToFloat(f32, skin.height - 1),
+                };
+
+                const vtx_idx = for (vertices.items) |v, j| {
+                    if (Vertex.eql(vertex, v, 0.001, 0.95, 1.0 / 32768.0))
+                        break j;
+                } else vertices.items.len;
+
+                try indices.append(@intCast(u16, vtx_idx));
+
+                if (vtx_idx == vertices.items.len) {
+                    try vertices.append(vertex);
+                }
+            }
+        }
+
+        try meshes.append(Mesh{
+            .offset = 0,
+            .count = indices.items.len,
+            .texture = texture,
+        });
+
+        return zg.ResourceManager.GeometryData{
+            .vertices = vertices.toOwnedSlice(),
+            .indices = indices.toOwnedSlice(),
+            .meshes = meshes.toOwnedSlice(),
+        };
+    }
+};
+
+const WmbLightmapLoader = struct {
+    lightmap: gamestudio.wmb.LightMap,
+
+    pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.TextureData {
+        const source: gamestudio.wmb.LightMap = loader.lightmap;
+
+        var data = zg.ResourceManager.TextureData{
+            .width = std.math.cast(u15, source.width) orelse return error.InvalidFormat,
+            .height = std.math.cast(u15, source.height) orelse return error.InvalidFormat,
+            .pixels = undefined,
+        };
+
+        const pixel_count = @as(usize, data.width) * @as(usize, data.height);
+
+        data.pixels = try rm.allocator.alloc(u8, 4 * pixel_count);
+        errdefer rm.allocator.free(data.pixels.?);
+
+        var i: usize = 0;
+        while (i < pixel_count) : (i += 1) {
+            data.pixels.?[4 * i + 0] = source.data[3 * i + 0];
+            data.pixels.?[4 * i + 1] = source.data[3 * i + 1];
+            data.pixels.?[4 * i + 2] = source.data[3 * i + 2];
+            data.pixels.?[4 * i + 3] = 0xFF;
+        }
+
+        return data;
+    }
+};
+
+const TextureCache = std.AutoHashMap(u16, ?*Texture);
+
+const WmbGeometryLoader = struct {
+    const Vertex = zg.ResourceManager.Vertex;
+    const Mesh = zg.ResourceManager.Mesh;
+
+    level: gamestudio.wmb.Level,
+    block: gamestudio.wmb.Block,
+    textures: *TextureCache,
+
+    fn vert2pos(v: Vertex) Vector3 {
+        return vector(v.x, v.y, v.z);
+    }
+
+    fn normal2vert(v: *Vertex, normal: Vector3) void {
+        v.nx = normal.x;
+        v.ny = normal.y;
+        v.nz = normal.z;
+    }
+
+    pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.GeometryData {
+        const block = loader.block;
+
+        var data = zg.ResourceManager.GeometryData{
+            .vertices = undefined, // []Vertex,
+            .indices = undefined, // []u16,
+            .meshes = undefined, // []Mesh,
+        };
+
+        data.indices = try rm.allocator.alloc(u16, 3 * block.triangles.len);
+        errdefer rm.allocator.free(data.indices);
+
+        data.vertices = try rm.allocator.alloc(Vertex, block.vertices.len);
+        errdefer rm.allocator.free(data.vertices);
+
+        for (block.vertices) |src_vtx, i| {
+            data.vertices[i] = Vertex{
+                .x = src_vtx.position.x,
+                .y = src_vtx.position.y,
+                .z = src_vtx.position.z,
+
+                // TODO: Fill with correct data
+                .nx = 0,
+                .ny = 1,
+                .nz = 0,
+
+                .u = src_vtx.texture_coord.x,
+                .v = src_vtx.texture_coord.y,
+            };
+        }
+
+        // pre-sort triangles so we can easily created
+        // meshes based on the texture alone.
+        std.sort.sort(gamestudio.wmb.Triangle, block.triangles, block, struct {
+            fn lt(ctx: gamestudio.wmb.Block, lhs: gamestudio.wmb.Triangle, rhs: gamestudio.wmb.Triangle) bool {
+                const lhs_tex = ctx.skins[lhs.skin].texture;
+                const rhs_tex = ctx.skins[rhs.skin].texture;
+                return lhs_tex < rhs_tex;
+            }
+        }.lt);
+
+        var meshes = std.ArrayList(Mesh).init(rm.allocator);
+        defer meshes.deinit();
+
+        if (block.triangles.len > 0) {
+            var mesh: *Mesh = undefined;
+            var current_texture: u16 = ~@as(u16, 0);
+
+            for (block.triangles) |tris, i| {
+                const tex_index = block.skins[tris.skin].texture;
+                if (i == 0 or tex_index != current_texture) {
+                    current_texture = tex_index;
+
+                    const texture = try loader.textures.getOrPut(tex_index);
+
+                    if (!texture.found_existing) {
+                        texture.value_ptr.* = rm.createTexture(.@"3d", WmbTextureLoader{
+                            .level = loader.level,
+                            .index = tex_index,
+                        }) catch |err| blk: {
+                            std.log.err("failed to decode texture: {s}", .{@errorName(err)});
+                            break :blk null;
+                        };
+                    }
+
+                    mesh = try meshes.addOne();
+                    mesh.* = Mesh{
+                        .offset = 3 * i,
+                        .count = 0,
+                        .texture = texture.value_ptr.*,
+                    };
+                }
+
+                const indices = data.indices[3 * i ..][0..3];
+                indices.* = tris.indices;
+
+                // TODO: Improve normal computation
+                // very shitty normal computation code,
+                // this one will just make "last face wins".
+                const p0 = vert2pos(data.vertices[indices[0]]);
+                const p1 = vert2pos(data.vertices[indices[1]]);
+                const p2 = vert2pos(data.vertices[indices[2]]);
+
+                var p10 = p1.sub(p0).normalize();
+                var p20 = p2.sub(p0).normalize();
+
+                var n = p20.cross(p10).normalize();
+
+                normal2vert(&data.vertices[indices[0]], n);
+                normal2vert(&data.vertices[indices[1]], n);
+                normal2vert(&data.vertices[indices[2]], n);
+
+                mesh.count += 3;
+            }
+        }
+        data.meshes = meshes.toOwnedSlice();
+
+        return data;
+    }
+};
+
+fn oom() noreturn {
     @panic("out of memory");
 }
 
-inline fn panic(val: anytype) noreturn {
+fn panic(val: anytype) noreturn {
     const T = @TypeOf(val);
     if (T == []const u8)
         @panic(val);
-    switch (@typeInfo(T)) {
-        .ErrorSet => if (val == error.OutOfMemory) oom() else std.debug.panic("unhandled error: {s}", .{@errorName(val)}),
+
+    const info = @typeInfo(T);
+
+    if (info == .Array and info.Array.child == u8) {
+        return panic(@as([]const u8, &val));
+    }
+
+    if (info == .Pointer and info.Pointer.size == .One) {
+        panic(val.*);
+        unreachable;
+    }
+
+    switch (info) {
+        .ErrorSet => {
+            if (val == error.OutOfMemory) oom();
+            std.debug.panic("unhandled error: {s}", .{@errorName(val)});
+            if (@errorReturnTrace()) |err_trace| {
+                std.debug.dumpStackTrace(err_trace.*);
+            }
+        },
         .Enum => std.debug.panic("unhandled error: {s}", .{@tagName(val)}),
         else => std.debug.panic("unhandled error: {any}", .{val}),
     }

@@ -4,3 +4,6 @@
 [submodule "vendor/zero-graphics"]
 	path = vendor/zero-graphics
 	url = https://github.com/MasterQ32/zero-graphics
+[submodule "vendor/libgamestudio"]
+	path = vendor/libgamestudio
+	url = https://github.com/MasterQ32/libgamestudio.git
