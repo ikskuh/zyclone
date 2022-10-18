@@ -864,7 +864,7 @@ pub const @"__implementation" = struct {
                     &level_source,
                     .{
                         .target_coordinate_system = .opengl,
-                        .scale = 1.0 / 16.0,
+                        // .scale = 1.0 / 16.0,
                     },
                 ) catch |err| {
                     std.log.err("failed to load level file '{s}': {s}", .{
