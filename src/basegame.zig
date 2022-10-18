@@ -124,10 +124,10 @@ pub const level = struct {
 
             for (level_data.objects) |object, oid| {
                 switch (object) {
-                    .position => std.log.err("TODO: Implement loading of position object.", .{}),
-                    .light => std.log.err("TODO: Implement loading of light object.", .{}),
-                    .sound => std.log.err("TODO: Implement loading of sound object.", .{}),
-                    .path => std.log.err("TODO: Implement loading of path object.", .{}),
+                    .position => std.log.warn("TODO: Implement loading of position object.", .{}),
+                    .light => std.log.warn("TODO: Implement loading of light object.", .{}),
+                    .sound => std.log.warn("TODO: Implement loading of sound object.", .{}),
+                    .path => std.log.warn("TODO: Implement loading of path object.", .{}),
                     .entity => |def| {
                         const ent = entity.createAt(level_dir, def.file_name.get(), wmb2vec(def.origin), null);
                         ent.rot = Angle{ .pan = def.angle.pan, .tilt = def.angle.tilt, .roll = def.angle.roll };
@@ -169,13 +169,13 @@ pub const level = struct {
                                 //
                             }
                         } else if (def.action.len() > 0) {
-                            std.log.err("Entity '{s}' has an action '{s}', but there's no global action list available.", .{
-                                def.name.get(),
-                                def.action.get(),
+                            std.log.warn("Entity '{s}' has an action '{s}', but there's no global action list available.", .{
+                                def.name,
+                                def.action,
                             });
                         }
                     },
-                    .region => std.log.err("TODO: Implement loading of region object.", .{}),
+                    .region => std.log.warn("TODO: Implement loading of region object.", .{}),
                 }
             }
         }
@@ -952,7 +952,7 @@ const AcknexTextureLoader = struct {
                 }
             },
 
-            .pal256, .dds => return error.InvalidFormat,
+            .pal256, .dds, .@"extern" => return error.InvalidFormat,
         }
 
         return data;
@@ -1008,7 +1008,7 @@ const MdlGeometryLoader = struct {
         for (mdl.triangles) |tris| {
             var i: usize = 0;
             while (i < 3) : (i += 1) {
-                const uv = mdl.skin_vertices[tris.indices_uv[i]];
+                const uv = mdl.skin_vertices.getUV(tris.indices_uv1[i], skin.width, skin.height);
                 const vtx = frame.vertices[tris.indices_3d[i]];
 
                 var vertex = Vertex{
@@ -1018,8 +1018,8 @@ const MdlGeometryLoader = struct {
                     .nx = vtx.normal.x,
                     .ny = vtx.normal.y,
                     .nz = vtx.normal.z,
-                    .u = @intToFloat(f32, uv.u) / @intToFloat(f32, skin.width - 1),
-                    .v = @intToFloat(f32, uv.v) / @intToFloat(f32, skin.height - 1),
+                    .u = uv.u,
+                    .v = uv.v,
                 };
 
                 const vtx_idx = for (vertices.items) |v, j| {
