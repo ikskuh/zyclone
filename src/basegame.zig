@@ -12,6 +12,21 @@ fn core() *zg.CoreApplication {
 pub const nullvector = zlm.vec3(0, 0, 0);
 pub const vector = zlm.vec3;
 pub const Vector3 = zlm.Vec3;
+pub const Color = zg.Color;
+pub const Point = zg.Point;
+pub const Rectangle = zg.Rectangle;
+
+pub const BoundingBox = struct {
+    min: Vector3,
+    max: Vector3,
+
+    pub fn insert(bb: *BoundingBox, in: Vector3) void {
+        bb.min = Vector3.componentMin(bb.min, in);
+        bb.max = Vector3.componentMax(bb.max, in);
+    }
+
+    pub const empty = BoundingBox{ .min = Vector3.zero, .max = Vector3.zero };
+};
 
 pub const Matrix4 = zlm.Mat4;
 
@@ -79,13 +94,53 @@ pub const mem = struct {
 
 pub const level = struct {
     var arena: std.heap.ArenaAllocator = undefined;
-    var entities: std.TailQueue(Entity) = .{};
+    var entity_list: std.TailQueue(Entity) = .{};
     var level_behaviours: BehaviourSystem(level, void) = .{};
 
     var palette: ?gamestudio.wmb.Palette = null;
 
+    pub const EntityIterator = struct {
+        pub const Options = struct {
+            filter: ?std.meta.FnPtr(fn (*Entity) bool) = null,
+        };
+
+        current: ?*std.TailQueue(Entity).Node,
+        options: Options,
+
+        pub fn next(iter: *EntityIterator) ?*Entity {
+            while (iter.current) |item| {
+                const ent = &item.data;
+                iter.current = item.next;
+
+                if (iter.options.filter) |filter| {
+                    if (!filter(ent))
+                        continue;
+                }
+
+                return ent;
+            }
+            return null;
+        }
+    };
+
+    pub fn entities(options: EntityIterator.Options) EntityIterator {
+        return EntityIterator{
+            .options = options,
+            .current = entity_list.first,
+        };
+    }
+
     fn wmb2vec(v: gamestudio.Vector3) Vector3 {
         return vector(v.x, v.y, v.z);
+    }
+
+    fn wmb2col(v: gamestudio.Color) Color {
+        return Color{
+            .r = @floatToInt(u8, 255.0 * std.math.clamp(v.r, 0, 1)),
+            .g = @floatToInt(u8, 255.0 * std.math.clamp(v.g, 0, 1)),
+            .b = @floatToInt(u8, 255.0 * std.math.clamp(v.b, 0, 1)),
+            .a = @floatToInt(u8, 255.0 * std.math.clamp(v.a, 0, 1)),
+        };
     }
 
     /// Destroys all currently active entities, and provides a clean slate for 3D data.
@@ -94,7 +149,7 @@ pub const level = struct {
     pub fn load(path: ?[]const u8) void {
         arena.deinit();
         arena = std.heap.ArenaAllocator.init(mem.backing);
-        entities = .{};
+        entity_list = .{};
         level_behaviours = .{};
         level.palette = null;
 
@@ -132,7 +187,19 @@ pub const level = struct {
                     .position => std.log.warn("TODO: Implement loading of position object.", .{}),
                     .light => |light| {
                         if (light.flags.dynamic) {
-                            std.log.warn("TODO: Implement loading of dynamic light object.", .{});
+                            const ent = entity.create(null, vec.make(light.origin), null);
+                            ent.light = Light{
+                                .color = wmb2col(light.color),
+                                .range = light.range,
+                                .cast = light.flags.cast,
+                            };
+                        } else {
+                            const ent = entity.create(null, vec.make(light.origin), null);
+                            ent.light = Light{
+                                .color = wmb2col(light.color),
+                                .range = light.range,
+                                .cast = light.flags.cast,
+                            };
                         }
                     },
                     .sound => std.log.warn("TODO: Implement loading of sound object.", .{}),
@@ -142,6 +209,10 @@ pub const level = struct {
                         ent.rot = Angle{ .pan = def.angle.pan, .tilt = def.angle.tilt, .roll = def.angle.roll };
                         ent.scale = wmb2vec(def.scale);
                         ent.skills = def.skills;
+                        // ent.flags = .{
+                        //     .visible = !def.flags.invisible,
+                        //     .passable = def.flags.passable,
+                        // };
 
                         // Load terrain lightmap if possible
                         {
@@ -235,6 +306,7 @@ pub const entity = struct {
         if (file) |actual_file_path| {
             if (@"__implementation".loadRenderObject(folder, actual_file_path)) |geom| {
                 ent.data.geometry = geom;
+                ent.data.bounds = geom.computeBounds();
             } else {
                 std.log.err("could not find entity '{s}'", .{actual_file_path});
             }
@@ -244,13 +316,37 @@ pub const entity = struct {
             _ = ent.data.attach(ActualBehaviour);
         }
 
-        level.entities.append(ent);
+        level.entity_list.append(ent);
+
+        if (ent.data.geometry) |geom| {
+            if (geom == .blocks and geom.blocks.level.objects.len > 1) {
+                std.log.warn("didn't load {} sub objects for {s}", .{ geom.blocks.level.objects.len, file.? });
+            }
+        }
 
         return &ent.data;
     }
 };
 
+pub const Light = struct {
+    range: f32,
+    color: Color,
+
+    /// casts a shadow
+    cast: bool = false,
+
+    spot: ?Spot = null,
+
+    pub const Spot = struct {
+        arc: f32 = 45.0,
+    };
+};
+
 pub const Entity = struct {
+    pub const Flags = struct {
+        visible: bool = true,
+        passable: bool = false,
+    };
     const Behaviours = BehaviourSystem(level, *Entity);
 
     // public:
@@ -260,10 +356,13 @@ pub const Entity = struct {
 
     user_data: [256]u8 = std.mem.zeroes([256]u8),
     skills: [20]f32 = std.mem.zeroes([20]f32),
+    flags: Flags = .{},
 
     // visuals
     geometry: ?RenderObject = null,
     lightmap: ?*Texture = null,
+    bounds: BoundingBox = BoundingBox.empty,
+    light: ?Light = null,
 
     // private:
     behaviours: Behaviours = .{},
@@ -283,6 +382,16 @@ pub const Entity = struct {
 
     pub fn detach(ent: *Entity, comptime Behaviour: type) void {
         return ent.behaviours.detach(Behaviour);
+    }
+
+    // predicates
+
+    pub fn isVisible(ent: *Entity) bool {
+        return (ent.geometry != null) and ent.flags.visible;
+    }
+
+    pub fn isLight(ent: *Entity) bool {
+        return (ent.light != null) and ent.flags.visible;
     }
 };
 
@@ -306,6 +415,68 @@ pub const RenderObject = union(RenderObjectType) {
 
     /// A heightmap geometry
     terrain: Terrain,
+
+    fn vert2vec(vtx: anytype) Vector3 {
+        return vector(vtx.x, vtx.y, vtx.z);
+    }
+
+    /// Computes the bounding box for the render object.
+    pub fn computeBounds(ro: RenderObject) BoundingBox {
+        switch (ro) {
+            .model => |model| {
+                if (model.vertices.len == 0)
+                    return BoundingBox.empty;
+
+                var bb = BoundingBox{
+                    .min = vert2vec(model.vertices[0]),
+                    .max = vert2vec(model.vertices[1]),
+                };
+
+                for (model.vertices[1..]) |v| {
+                    bb.insert(vert2vec(v));
+                }
+
+                return bb;
+            },
+            .sprite => |sprite| {
+                var size = vector(
+                    @intToFloat(f32, sprite.width) / 2,
+                    @intToFloat(f32, sprite.height) / 2,
+                    0,
+                );
+                return BoundingBox{
+                    .min = size.scale(-1),
+                    .max = size,
+                };
+            },
+            .blocks => |blocks| {
+                if (blocks.geometries.len == 0)
+                    return BoundingBox.empty;
+
+                const first = for (blocks.geometries) |vals| {
+                    if (vals.vertices.len != 0)
+                        break vals.vertices[0];
+                } else return BoundingBox.empty;
+
+                var bb = BoundingBox{
+                    .min = vert2vec(first),
+                    .max = vert2vec(first),
+                };
+
+                for (blocks.geometries) |block| {
+                    for (block.vertices) |vtx| {
+                        bb.insert(vert2vec(vtx));
+                    }
+                }
+
+                return bb;
+            },
+            .terrain => |terrain| {
+                _ = terrain;
+                @panic("RenderObject.computeBounds not implemented for terrain");
+            },
+        }
+    }
 };
 
 pub const Sprite = struct {
@@ -320,6 +491,7 @@ pub const Terrain = struct {
 };
 
 pub const BlockGeometry = struct {
+    level: gamestudio.wmb.Level,
     geometries: []*zg.ResourceManager.Geometry,
 
     fn fromWmbData(allocator: std.mem.Allocator, lvl: gamestudio.wmb.Level) BlockGeometry {
@@ -340,6 +512,7 @@ pub const BlockGeometry = struct {
         }
 
         return BlockGeometry{
+            .level = lvl,
             .geometries = geoms,
         };
     }
@@ -436,6 +609,18 @@ pub const mat = struct {
 };
 
 pub const vec = struct {
+    pub fn make(any: anytype) Vector3 {
+        const T = @TypeOf(any);
+        return if (@hasField(T, "x"))
+            vector(any.x, any.y, any.z)
+        else if (@typeInfo(T) == .Array)
+            vector(any[0], any[1], any[2])
+        else if (@typeInfo(T).Struct.is_tuple)
+            vector(any[0], any[1], any[2])
+        else
+            @compileError("Unsupported type " ++ @typeName(T) ++ " passed to ");
+    }
+
     pub fn rotate(v: Vector3, ang: Angle) Vector3 {
         return v.transformDirection(mat.forAngle(ang));
     }
@@ -453,6 +638,228 @@ pub const vec = struct {
 
 pub const screen = struct {
     pub var color: zg.Color = .{ .r = 0, .g = 0, .b = 0x80 };
+};
+
+pub const DebugPanels = struct {
+    controls_visible: bool = false,
+    states_visible: bool = false,
+
+    show_entities: bool = false,
+    show_lights: bool = false,
+    show_regions: bool = false,
+    show_paths: bool = false,
+
+    fn drawCross(center: Vector3, size: f32, color: Color) void {
+        draw.line3D(center.sub(vector(size, 0, 0)), center.add(vector(size, 0, 0)), color);
+        draw.line3D(center.sub(vector(0, size, 0)), center.add(vector(0, size, 0)), color);
+        draw.line3D(center.sub(vector(0, 0, size)), center.add(vector(0, 0, size)), color);
+    }
+
+    fn drawCircle(center: Vector3, normal: Vector3, radius: f32, color: Color) void {
+        const candidate_a = Vector3.cross(normal, Vector3.unitX);
+        const tangent = if (candidate_a.length2() < 0.1 or @fabs(Vector3.dot(candidate_a, normal)) > 0.9) // basically linear
+            Vector3.cross(normal, Vector3.unitZ).normalize()
+        else
+            candidate_a.normalize();
+
+        const cotangent = Vector3.cross(tangent, normal).normalize();
+
+        var prev: Vector3 = center.add(tangent.scale(radius));
+
+        var i: usize = 10;
+        while (i <= 360) : (i += 10) {
+            const a = std.math.pi * @intToFloat(f32, i) / 180.0;
+            var current = center.add(tangent.scale(radius * @cos(a))).add(cotangent.scale(radius * @sin(a)));
+            defer prev = current;
+
+            draw.line3D(prev, current, color);
+        }
+    }
+
+    pub fn update(pan: *@This()) void {
+        if (pan.show_entities) {
+            var it = level.entities(.{ .filter = Entity.isVisible });
+            while (it.next()) |ent| {
+                drawCross(ent.pos, 5.0, Color.red);
+
+                const min = ent.bounds.min;
+                const max = ent.bounds.max;
+
+                var corners = [8]Vector3{
+                    vector(min.x, min.y, min.z),
+                    vector(min.x, min.y, max.z),
+                    vector(min.x, max.y, min.z),
+                    vector(min.x, max.y, max.z),
+                    vector(max.x, min.y, min.z),
+                    vector(max.x, min.y, max.z),
+                    vector(max.x, max.y, min.z),
+                    vector(max.x, max.y, max.z),
+                };
+
+                for (corners) |*c| {
+                    const v = c.*;
+                    c.* = vec.rotate(v.mul(ent.scale), ent.rot).add(ent.pos);
+                }
+
+                const outlines = [12][2]usize{
+                    .{ 0, 1 },
+                    .{ 0, 2 },
+                    .{ 2, 3 },
+                    .{ 1, 3 },
+                    .{ 4, 5 },
+                    .{ 4, 6 },
+                    .{ 5, 7 },
+                    .{ 6, 7 },
+                    .{ 0, 4 },
+                    .{ 1, 5 },
+                    .{ 2, 6 },
+                    .{ 3, 7 },
+                };
+                for (outlines) |line| {
+                    draw.line3D(corners[line[0]], corners[line[1]], Color.red);
+                }
+            }
+        }
+        if (pan.show_lights) {
+            var it = level.entities(.{ .filter = Entity.isLight });
+            while (it.next()) |ent| {
+                drawCross(ent.pos, 5.0, Color.yellow);
+
+                const light: Light = ent.light.?;
+
+                if (light.spot) |spot| {
+                    _ = spot;
+                    std.log.err("spotlight visualization not done yet.", .{});
+                } else {
+                    drawCircle(ent.pos, Vector3.unitX, 10, Color.yellow);
+                    drawCircle(ent.pos, Vector3.unitY, 10, Color.yellow);
+                    drawCircle(ent.pos, Vector3.unitZ, 10, Color.yellow);
+                    drawCircle(ent.pos, Vector3.unitX, light.range, Color.yellow);
+                    drawCircle(ent.pos, Vector3.unitY, light.range, Color.yellow);
+                    drawCircle(ent.pos, Vector3.unitZ, light.range, Color.yellow);
+                }
+            }
+        }
+
+        if (pan.show_regions) {
+            //
+        }
+        if (pan.show_paths) {
+            //
+        }
+
+        if (key.pressed(.f12)) {
+            pan.controls_visible = !pan.controls_visible;
+        }
+        if (key.pressed(.f11)) {
+            pan.states_visible = !pan.states_visible;
+        }
+
+        if (pan.states_visible) {
+            const panel_rect = Rectangle{
+                .x = 10,
+                .y = 10,
+                .width = 300,
+                .height = 140,
+            };
+
+            ui.panel(panel_rect, .{});
+
+            const content_rect = panel_rect.shrink(10);
+
+            const Layout = struct {
+                const rows = 6;
+                const cols = 4;
+                pub fn item(rect: Rectangle, row: u15, col: u15, comptime fmt: []const u8, args: anytype) void {
+                    const subrect = Rectangle{
+                        .x = rect.x + (col * rect.width / cols),
+                        .y = rect.y + (row * rect.height / rows),
+                        .width = rect.width / cols,
+                        .height = rect.height / rows,
+                    };
+                    var buffer: [1024]u8 = undefined;
+                    const str = std.fmt.bufPrint(&buffer, fmt, args) catch "";
+                    ui.label(subrect, str, .{
+                        .id = .{ row, col, fmt },
+                    });
+                }
+            };
+
+            Layout.item(content_rect, 0, 0, "   x = {d:.0}", .{camera.pos.x});
+            Layout.item(content_rect, 1, 0, "   y = {d:.0}", .{camera.pos.y});
+            Layout.item(content_rect, 2, 0, "   z = {d:.0}", .{camera.pos.z});
+            Layout.item(content_rect, 3, 0, " pan = {d:.0}", .{camera.rot.pan});
+            Layout.item(content_rect, 4, 0, "tilt = {d:.0}", .{camera.rot.tilt});
+            Layout.item(content_rect, 5, 0, "roll = {d:.0}", .{camera.rot.roll});
+
+            Layout.item(content_rect, 0, 1, "ents = {d}", .{level.entity_list.len});
+        }
+
+        if (pan.controls_visible) {
+            const panel_rect = Rectangle{
+                .x = core().screen_size.width - 210,
+                .y = 10,
+                .width = 200,
+                .height = 160,
+            };
+
+            ui.panel(panel_rect, .{});
+
+            const content_rect = panel_rect.shrink(10);
+
+            var stack = zg.UserInterface.VerticalStackLayout.init(content_rect);
+
+            {
+                const item = stack.get(20);
+                if (ui.checkBox(boxField(item), pan.show_entities, .{}))
+                    pan.show_entities = !pan.show_entities;
+
+                ui.label(textField(item), "Show Entities", .{});
+            }
+            stack.advance(10);
+            {
+                const item = stack.get(20);
+                if (ui.checkBox(boxField(item), pan.show_lights, .{}))
+                    pan.show_lights = !pan.show_lights;
+
+                ui.label(textField(item), "Show Lights", .{});
+            }
+            stack.advance(10);
+            {
+                const item = stack.get(20);
+                if (ui.checkBox(boxField(item), pan.show_regions, .{}))
+                    pan.show_regions = !pan.show_regions;
+
+                ui.label(textField(item), "Show Regions", .{});
+            }
+            stack.advance(10);
+            {
+                const item = stack.get(20);
+                if (ui.checkBox(boxField(item), pan.show_paths, .{}))
+                    pan.show_paths = !pan.show_paths;
+
+                ui.label(textField(item), "Show Paths", .{});
+            }
+        }
+    }
+
+    fn boxField(rect: Rectangle) Rectangle {
+        return Rectangle{
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.height,
+            .height = rect.height,
+        };
+    }
+
+    fn textField(rect: Rectangle) Rectangle {
+        return Rectangle{
+            .x = rect.x + rect.height + 10,
+            .y = rect.y,
+            .width = rect.width - rect.height - 10,
+            .height = rect.height,
+        };
+    }
 };
 
 pub const DefaultCamera = struct {
@@ -505,9 +912,54 @@ pub const DefaultCamera = struct {
     }
 };
 
+pub const draw = struct {
+    pub fn line3D(from: Vector3, to: Vector3, color: Color) void {
+        __implementation.debug3d.drawLine(@bitCast([3]f32, from), @bitCast([3]f32, to), color) catch oom();
+    }
+    pub fn line(from: Point, to: Point, color: Color) void {
+        __implementation.r2d.drawLine(from.x, from.y, to.x, to.y, color) catch oom();
+    }
+};
+
+pub const ui = struct {
+    pub const TextBoxEvent = zg.UserInterface.Builder.TextBoxEvent;
+    pub const CodeEditor = zg.CodeEditor;
+
+    pub fn panel(rectangle: Rectangle, config: anytype) void {
+        return __implementation.interface_builder.?.panel(rectangle, config) catch |err| panic(err);
+    }
+    pub fn modalLayer(config: anytype) bool {
+        return __implementation.interface_builder.?.modalLayer(config) catch |err| panic(err);
+    }
+    pub fn button(rectangle: Rectangle, text: ?[]const u8, icon: ?*Texture, config: anytype) bool {
+        return __implementation.interface_builder.?.button(rectangle, text, icon, config) catch |err| panic(err);
+    }
+    pub fn checkBox(rectangle: Rectangle, is_checked: bool, config: anytype) bool {
+        return __implementation.interface_builder.?.checkBox(rectangle, is_checked, config) catch |err| panic(err);
+    }
+    pub fn radioButton(rectangle: Rectangle, is_checked: bool, config: anytype) bool {
+        return __implementation.interface_builder.?.radioButton(rectangle, is_checked, config) catch |err| panic(err);
+    }
+    pub fn label(rectangle: Rectangle, text: []const u8, config: anytype) void {
+        return __implementation.interface_builder.?.label(rectangle, text, config) catch |err| panic(err);
+    }
+    pub fn image(rectangle: Rectangle, texture: *Texture, config: anytype) void {
+        return __implementation.interface_builder.?.image(rectangle, texture, config) catch |err| panic(err);
+    }
+    pub fn custom(rectangle: Rectangle, user_data: ?*anyopaque, config: anytype) ?usize {
+        return __implementation.interface_builder.?.custom(rectangle, user_data, config) catch |err| panic(err);
+    }
+    pub fn textBox(rectangle: Rectangle, display_string: []const u8, config: anytype) ?TextBoxEvent {
+        return __implementation.interface_builder.?.textBox(rectangle, display_string, config) catch |err| panic(err);
+    }
+    pub fn codeEditor(rectangle: Rectangle, initial_code: []const u8, config: anytype) *CodeEditor {
+        return __implementation.interface_builder.?.codeEditor(rectangle, initial_code, config) catch |err| panic(err);
+    }
+};
+
 /// do not use this!
 /// it's meant for internal use of the engine
-pub const @"__implementation" = struct {
+pub const __implementation = struct {
     const Application = main;
     var quit_now = false;
 
@@ -519,12 +971,18 @@ pub const @"__implementation" = struct {
     var last_frame_time: i64 = undefined;
     var r2d: zg.Renderer2D = undefined;
     var r3d: zg.Renderer3D = undefined;
+    var debug3d: zg.DebugRenderer3D = undefined;
+    var interface: zg.UserInterface = undefined;
+    var interface_builder: ?zg.UserInterface.Builder = null;
 
     pub fn init(app: *Application) !void {
         app.* = .{};
 
         r2d = try core().resources.createRenderer2D();
         r3d = try core().resources.createRenderer3D();
+        debug3d = try core().resources.createDebugRenderer3D();
+
+        interface = try zg.UserInterface.init(mem.backing, &r2d);
 
         mem.backing = core().allocator;
         level.arena = std.heap.ArenaAllocator.init(mem.backing);
@@ -551,82 +1009,93 @@ pub const @"__implementation" = struct {
         mouse.pressed_buttons = .{};
         mouse.released_buttons = .{};
 
-        const prev_mouse_pos = mouse.position;
-        while (zg.CoreApplication.get().input.fetch()) |event| {
-            switch (event) {
-                .quit => return false,
+        {
+            var ui_input_proc = interface.processInput();
+            defer ui_input_proc.finish();
 
-                .key_down => |key_code| {
-                    key.pressed_keys.insert(key_code);
-                    key.held_keys.insert(key_code);
-                },
+            var ui_input = ui_input_proc.inputFilter(core().input.filter());
 
-                .key_up => |key_code| {
-                    key.released_keys.insert(key_code);
-                    key.held_keys.remove(key_code);
-                },
+            var ui_filter = ui_input.inputFilter();
 
-                .pointer_motion => |position| {
-                    mouse.position = position;
-                },
+            const prev_mouse_pos = mouse.position;
+            while (try ui_filter.fetch()) |event| {
+                switch (event) {
+                    .quit => return false,
 
-                .pointer_press => |button| {
-                    mouse.pressed_buttons.insert(button);
-                    mouse.held_buttons.insert(button);
-                },
-                .pointer_release => |button| {
-                    mouse.released_buttons.insert(button);
-                    mouse.held_buttons.remove(button);
-                },
+                    .key_down => |key_code| {
+                        key.pressed_keys.insert(key_code);
+                        key.held_keys.insert(key_code);
+                    },
 
-                .text_input => |input| {
-                    _ = input;
-                },
+                    .key_up => |key_code| {
+                        key.released_keys.insert(key_code);
+                        key.held_keys.remove(key_code);
+                    },
+
+                    .pointer_motion => |position| {
+                        mouse.position = position;
+                    },
+
+                    .pointer_press => |button| {
+                        mouse.pressed_buttons.insert(button);
+                        mouse.held_buttons.insert(button);
+                    },
+                    .pointer_release => |button| {
+                        mouse.released_buttons.insert(button);
+                        mouse.held_buttons.remove(button);
+                    },
+
+                    .text_input => |input| {
+                        _ = input;
+                    },
+                }
             }
+
+            mouse.delta = .{
+                .x = mouse.position.x - prev_mouse_pos.x,
+                .y = mouse.position.y - prev_mouse_pos.y,
+            };
         }
 
-        mouse.delta = .{
-            .x = mouse.position.x - prev_mouse_pos.x,
-            .y = mouse.position.y - prev_mouse_pos.y,
-        };
+        r2d.reset();
+        r3d.reset();
+        debug3d.reset();
 
-        // global update process
         {
-            global_behaviours.updateAll({});
-        }
+            interface_builder = interface.construct(core().screen_size);
+            defer interface_builder.?.finish();
 
-        // level update process
-        {
-            level.level_behaviours.updateAll({});
-        }
-
-        // entity update process
-        {
-            var it = level.entities.first;
-            while (it) |node| : (it = node.next) {
-                const ent: *Entity = &node.data;
-
-                ent.behaviours.updateAll(ent);
+            // global update process
+            {
+                global_behaviours.updateAll({});
             }
-        }
 
-        // schedule coroutines
-        {
-            // scheduler.nextFrame();
+            // level update process
+            {
+                level.level_behaviours.updateAll({});
+            }
+
+            // entity update process
+            {
+                var it: level.EntityIterator = level.entities(.{});
+                while (it.next()) |ent| {
+                    ent.behaviours.updateAll(ent);
+                }
+            }
+
+            // schedule coroutines
+            {
+                // scheduler.nextFrame();
+            }
         }
 
         if (quit_now)
             return false;
 
-        r2d.reset();
-        r3d.reset();
-
         // render all entities
         {
-            var it = level.entities.first;
-            while (it) |node| : (it = node.next) {
-                const ent: *Entity = &node.data;
-
+            var it: level.EntityIterator = level.entities(.{ .filter = Entity.isVisible });
+            while (it.next()) |ent| {
                 if (ent.geometry) |render_object| {
                     const mat_pos = zlm.Mat4.createTranslation(ent.pos);
                     const mat_rot = mat.forAngle(ent.rot);
@@ -668,6 +1137,8 @@ pub const @"__implementation" = struct {
             }
         }
 
+        try interface.render();
+
         return (quit_now == false);
     }
 
@@ -704,6 +1175,8 @@ pub const @"__implementation" = struct {
         });
 
         r3d.render(camera_view_proj.fields);
+
+        debug3d.render(camera_view_proj.fields);
 
         r2d.render(ss);
     }
@@ -922,7 +1395,11 @@ pub const @"__implementation" = struct {
                         // .loader = TextureLoader{ .dir = dir },
                     };
 
-                    break :blk .{ .model = core().resources.createGeometry(spec) catch |err| panic(err) };
+                    break :blk .{ .model = core().resources.createGeometry(spec) catch |err| {
+                        std.log.err("failed to load {s}: {s}", .{ path, @errorName(err) });
+                        std.debug.assert(geometry_cache.remove(full_path));
+                        return null;
+                    } };
                 } else {
                     var file_data = dir.readFileAlloc(
                         mem.backing,
@@ -1133,12 +1610,25 @@ const MdlGeometryLoader = struct {
         var meshes = std.ArrayList(Mesh).init(rm.allocator);
         defer meshes.deinit();
 
-        const frame = mdl.frames[self.frame];
-        const skin = mdl.skins[0]; // TODO: check for correct skin!
+        if (self.frame >= mdl.frames.len) {
+            std.log.err("frame {} outside of {} frames.", .{ self.frame, mdl.frames.len });
+            return error.InvalidFormat;
+        }
 
-        const texture = try rm.createTexture(.@"3d", MdlTextureLoader{
-            .skin = skin,
-        });
+        const frame = mdl.frames[self.frame];
+
+        const texture = blk: {
+            if (mdl.skins.len <= 0)
+                break :blk null;
+
+            const skin = mdl.skins[0]; // TODO: check for correct skin!
+
+            const texture = try rm.createTexture(.@"3d", MdlTextureLoader{
+                .skin = skin,
+            });
+
+            break :blk texture;
+        } orelse __implementation.r3d.white_texture;
 
         try indices.ensureTotalCapacity(3 * mdl.triangles.len);
         try vertices.ensureTotalCapacity(frame.vertices.len); // rough estimate
@@ -1146,7 +1636,7 @@ const MdlGeometryLoader = struct {
         for (mdl.triangles) |tris| {
             var i: usize = 0;
             while (i < 3) : (i += 1) {
-                const uv = mdl.skin_vertices.getUV(tris.indices_uv1[i], skin.width, skin.height);
+                const uv = mdl.skin_vertices.getUV(tris.indices_uv1[i], texture.width, texture.height);
                 const vtx = frame.vertices[tris.indices_3d[i]];
 
                 var vertex = Vertex{
@@ -1277,6 +1767,11 @@ const WmbGeometryLoader = struct {
             for (block.triangles) |tris, i| {
                 const skin = block.skins[tris.skin];
                 const material = loader.level.materials[skin.material];
+
+                // skip all hidden blocks
+                // if (skin.type == .none)
+                //     continue;
+
                 if (i == 0 or skin.texture != current_texture) {
                     current_texture = skin.texture;
 

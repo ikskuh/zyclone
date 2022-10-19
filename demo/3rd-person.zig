@@ -6,10 +6,13 @@ pub fn main() !void {
     eng.DefaultCamera.vel_high = 256.0;
 
     eng.level.load("levels/future/future.wmb");
-    // eng.level.load("levels/future/doorlft1.wmb");
-    // eng.level.load("levels/wmb6-demo.wmb");
+    // eng.level.load("levels/import-test/root.wmb");
 
     _ = eng.attach(eng.DefaultCamera);
+    _ = eng.attach(eng.DebugPanels);
+
+    // eng.level.load("levels/future/doorlft1.wmb");
+    // eng.level.load("levels/wmb6-demo.wmb");
 
     // _ = eng.entity.create("terrain.z3d", eng.nullvector, null);
 
@@ -19,7 +22,6 @@ pub fn main() !void {
     // const sprite = eng.entity.create("levels/future/arrows.tga", eng.vector(0, 0, 0), _actions.Spinner);
     // sprite.scale = eng.Vector3.all(0.01);
 
-    // const player = eng.entity.create("cube.z3d", eng.vector(0, 0, -10), _actions.Player);
     // _ = player.attach(_actions.YBouncer);
 
     // var i: usize = 0;

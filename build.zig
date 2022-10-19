@@ -2,13 +2,19 @@ const std = @import("std");
 const zpm = @import("zpm.zig");
 
 pub fn build(b: *std.build.Builder) void {
+    const use_android = b.option(bool, "android", "Enable the android SDK") orelse false;
+
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
-    const sdk = zpm.sdks.@"zero-graphics".init(b, false);
+    const sdk = zpm.sdks.@"zero-graphics".init(b, use_android);
 
     const app = sdk.createApplication("3rd_person", "src/entrypoint.zig");
+    app.setDisplayName("Acknex Clone");
+    app.setPackageName("net.random_projects.games.acknex_clone");
     app.setBuildMode(mode);
+
+    // app.enable_code_editor = false;
 
     app.addPackage(zpm.pkgs.zlm);
     app.addPackage(zpm.pkgs.libgamestudio);
@@ -23,6 +29,14 @@ pub fn build(b: *std.build.Builder) void {
 
     const instance = app.compileFor(.{ .desktop = target });
     instance.install();
+
+    if (use_android) {
+        const android_app = app.compileFor(.android);
+
+        const android_step = b.step("app", "Builds the android app");
+
+        android_step.dependOn(android_app.getStep());
+    }
 
     const run_cmd = instance.run();
     run_cmd.step.dependOn(b.getInstallStep());
