@@ -130,7 +130,11 @@ pub const level = struct {
             for (level_data.objects) |object, oid| {
                 switch (object) {
                     .position => std.log.warn("TODO: Implement loading of position object.", .{}),
-                    .light => std.log.warn("TODO: Implement loading of light object.", .{}),
+                    .light => |light| {
+                        if (light.flags.dynamic) {
+                            std.log.warn("TODO: Implement loading of dynamic light object.", .{});
+                        }
+                    },
                     .sound => std.log.warn("TODO: Implement loading of sound object.", .{}),
                     .path => std.log.warn("TODO: Implement loading of path object.", .{}),
                     .entity => |def| {
