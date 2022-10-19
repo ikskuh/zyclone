@@ -82,6 +82,8 @@ pub const level = struct {
     var entities: std.TailQueue(Entity) = .{};
     var level_behaviours: BehaviourSystem(level, void) = .{};
 
+    var palette: ?gamestudio.wmb.Palette = null;
+
     fn wmb2vec(v: gamestudio.Vector3) Vector3 {
         return vector(v.x, v.y, v.z);
     }
@@ -94,6 +96,7 @@ pub const level = struct {
         arena = std.heap.ArenaAllocator.init(mem.backing);
         entities = .{};
         level_behaviours = .{};
+        level.palette = null;
 
         if (path) |real_path| {
             var level_dir = std.fs.cwd().openDir(std.fs.path.dirname(real_path) orelse ".", .{}) catch |err| panic(err);
@@ -109,9 +112,11 @@ pub const level = struct {
                 &level_source,
                 .{
                     .target_coordinate_system = .opengl,
-                    .scale = 1.0 / 16.0,
+                    // .scale = 1.0 / 16.0,
                 },
             ) catch |err| panic(err);
+
+            level.palette = level_data.palette;
 
             var block_geometry = BlockGeometry.fromWmbData(arena.allocator(), level_data);
 
@@ -440,6 +445,9 @@ pub const screen = struct {
 };
 
 pub const DefaultCamera = struct {
+    pub var vel_slow: f32 = 10.0;
+    pub var vel_high: f32 = 45.0;
+
     // const Mode = enum {
     //     no_visualization,
     //     only_stats,
@@ -453,9 +461,9 @@ pub const DefaultCamera = struct {
         const fps_mode = mouse.held(.secondary);
 
         const velocity: f32 = if (key.held(.shift_left))
-            45.0
+            vel_high
         else
-            10.0;
+            vel_slow;
 
         if (key.held(.left))
             camera.rot.pan += 90 * time.step;
@@ -891,7 +899,7 @@ pub const @"__implementation" = struct {
 };
 
 const AcknexTextureLoader = struct {
-    pub fn create(width: usize, height: usize, format: gamestudio.TextureFormat, src_data: []const u8, rm: *zg.ResourceManager) zg.ResourceManager.CreateResourceDataError!zg.ResourceManager.TextureData {
+    pub fn create(width: usize, height: usize, format: gamestudio.TextureFormat, pal: ?gamestudio.wmb.Palette, src_data: []const u8, rm: *zg.ResourceManager) zg.ResourceManager.CreateResourceDataError!zg.ResourceManager.TextureData {
         var data = zg.ResourceManager.TextureData{
             .width = std.math.cast(u15, width) orelse return error.InvalidFormat,
             .height = std.math.cast(u15, height) orelse return error.InvalidFormat,
@@ -952,7 +960,26 @@ const AcknexTextureLoader = struct {
                 }
             },
 
-            .pal256, .dds, .@"extern" => return error.InvalidFormat,
+            .pal256 => {
+                const palette = pal orelse gamestudio.default_palette;
+                //  {
+                //     std.log.err("cannot load texture of type pal256: missing palette", .{});
+                //     return error.InvalidFormat;
+                // };
+                var i: usize = 0;
+                while (i < pixel_count) : (i += 1) {
+                    const index = src_data[i];
+                    pixels[4 * i + 0] = @floatToInt(u8, 255 * palette[index].b);
+                    pixels[4 * i + 1] = @floatToInt(u8, 255 * palette[index].g);
+                    pixels[4 * i + 2] = @floatToInt(u8, 255 * palette[index].r);
+                    pixels[4 * i + 3] = 0xFF;
+                }
+            },
+
+            .dds, .@"extern" => {
+                std.log.err("cannot load texture of type {s}", .{@tagName(format)});
+                return error.InvalidFormat;
+            },
         }
 
         return data;
@@ -964,7 +991,14 @@ const MdlTextureLoader = struct {
 
     pub fn create(self: @This(), rm: *zg.ResourceManager) zg.ResourceManager.CreateResourceDataError!zg.ResourceManager.TextureData {
         var skin: gamestudio.mdl.Skin = self.skin;
-        return try AcknexTextureLoader.create(skin.width, skin.height, skin.format, skin.data, rm);
+        return try AcknexTextureLoader.create(
+            skin.width,
+            skin.height,
+            skin.format,
+            null,
+            skin.data,
+            rm,
+        );
     }
 };
 
@@ -974,7 +1008,14 @@ const WmbTextureLoader = struct {
 
     pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.TextureData {
         const source: gamestudio.wmb.Texture = loader.level.textures[loader.index];
-        return AcknexTextureLoader.create(source.width, source.height, source.format, source.data, rm);
+        return AcknexTextureLoader.create(
+            source.width,
+            source.height,
+            source.format,
+            loader.level.palette,
+            source.data,
+            rm,
+        );
     }
 };
 
@@ -1098,6 +1139,10 @@ const WmbGeometryLoader = struct {
         v.nz = normal.z;
     }
 
+    fn mapVec(in: gamestudio.Vector3) Vector3 {
+        return Vector3{ .x = in.x, .y = in.y, .z = in.z };
+    }
+
     pub fn create(loader: @This(), rm: *zg.ResourceManager) !zg.ResourceManager.GeometryData {
         const block = loader.block;
 
@@ -1110,24 +1155,10 @@ const WmbGeometryLoader = struct {
         data.indices = try rm.allocator.alloc(u16, 3 * block.triangles.len);
         errdefer rm.allocator.free(data.indices);
 
-        data.vertices = try rm.allocator.alloc(Vertex, block.vertices.len);
-        errdefer rm.allocator.free(data.vertices);
+        var vertices = std.ArrayList(Vertex).init(rm.allocator);
+        defer vertices.deinit();
 
-        for (block.vertices) |src_vtx, i| {
-            data.vertices[i] = Vertex{
-                .x = src_vtx.position.x,
-                .y = src_vtx.position.y,
-                .z = src_vtx.position.z,
-
-                // TODO: Fill with correct data
-                .nx = 0,
-                .ny = 1,
-                .nz = 0,
-
-                .u = src_vtx.texture_coord.x,
-                .v = src_vtx.texture_coord.y,
-            };
-        }
+        try vertices.ensureTotalCapacity(block.vertices.len);
 
         // pre-sort triangles so we can easily created
         // meshes based on the texture alone.
@@ -1147,16 +1178,17 @@ const WmbGeometryLoader = struct {
             var current_texture: u16 = ~@as(u16, 0);
 
             for (block.triangles) |tris, i| {
-                const tex_index = block.skins[tris.skin].texture;
-                if (i == 0 or tex_index != current_texture) {
-                    current_texture = tex_index;
+                const skin = block.skins[tris.skin];
+                const material = loader.level.materials[skin.material];
+                if (i == 0 or skin.texture != current_texture) {
+                    current_texture = skin.texture;
 
-                    const texture = try loader.textures.getOrPut(tex_index);
+                    const texture = try loader.textures.getOrPut(skin.texture);
 
                     if (!texture.found_existing) {
                         texture.value_ptr.* = rm.createTexture(.@"3d", WmbTextureLoader{
                             .level = loader.level,
-                            .index = tex_index,
+                            .index = skin.texture,
                         }) catch |err| blk: {
                             std.log.err("failed to decode texture: {s}", .{@errorName(err)});
                             break :blk null;
@@ -1171,29 +1203,71 @@ const WmbGeometryLoader = struct {
                     };
                 }
 
+                // Phase 1: Fetch the requested vertices
+                var face_vertices: [3]Vertex = undefined;
+                for (tris.indices) |src_index, j| {
+                    const src_vertex = block.vertices[src_index];
+
+                    face_vertices[j] = Vertex{
+                        .x = src_vertex.position.x,
+                        .y = src_vertex.position.y,
+                        .z = src_vertex.position.z,
+
+                        // will be computed in phase 2
+                        .nx = undefined,
+                        .ny = undefined,
+                        .nz = undefined,
+
+                        .u = src_vertex.texture_coord.x,
+                        .v = src_vertex.texture_coord.y,
+                    };
+
+                    if (loader.level.file_version == .WMB6) {
+                        const tex = mesh.texture.?;
+
+                        // WMB6 has implicit texture coordinates via the material
+                        // we need to compute the correct UV coordinates here!
+                        face_vertices[j].u = (Vector3.dot(vert2pos(face_vertices[j]), mapVec(material.vec_s)) + material.offset_s) / @intToFloat(f32, tex.width - 1);
+                        face_vertices[j].v = (Vector3.dot(vert2pos(face_vertices[j]), mapVec(material.vec_t)) + material.offset_t) / @intToFloat(f32, tex.height - 1);
+                    }
+                }
+
+                // Phase 2: Compute surface normal
+                {
+                    const p0 = vert2pos(face_vertices[0]);
+                    const p1 = vert2pos(face_vertices[1]);
+                    const p2 = vert2pos(face_vertices[2]);
+
+                    var p10 = p1.sub(p0).normalize();
+                    var p20 = p2.sub(p0).normalize();
+
+                    var n = p20.cross(p10).normalize();
+
+                    normal2vert(&face_vertices[0], n);
+                    normal2vert(&face_vertices[1], n);
+                    normal2vert(&face_vertices[2], n);
+                }
+
+                // Phase 3: Deduplicate vertices
                 const indices = data.indices[3 * i ..][0..3];
-                indices.* = tris.indices;
+                for (face_vertices) |dst_vertex, j| {
+                    const dst_index = &indices[j];
 
-                // TODO: Improve normal computation
-                // very shitty normal computation code,
-                // this one will just make "last face wins".
-                const p0 = vert2pos(data.vertices[indices[0]]);
-                const p1 = vert2pos(data.vertices[indices[1]]);
-                const p2 = vert2pos(data.vertices[indices[2]]);
+                    dst_index.* = @intCast(u16, for (vertices.items) |v, k| {
+                        if (Vertex.eql(dst_vertex, v, 1.0 / 1024.0, 0.9, 1.0 / 32768.0))
+                            break k;
+                    } else vertices.items.len);
 
-                var p10 = p1.sub(p0).normalize();
-                var p20 = p2.sub(p0).normalize();
-
-                var n = p20.cross(p10).normalize();
-
-                normal2vert(&data.vertices[indices[0]], n);
-                normal2vert(&data.vertices[indices[1]], n);
-                normal2vert(&data.vertices[indices[2]], n);
+                    if (dst_index.* == vertices.items.len) {
+                        try vertices.append(dst_vertex);
+                    }
+                }
 
                 mesh.count += 3;
             }
         }
         data.meshes = meshes.toOwnedSlice();
+        data.vertices = vertices.toOwnedSlice();
 
         return data;
     }

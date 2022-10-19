@@ -2,18 +2,23 @@ const std = @import("std");
 const eng = @import("basegame");
 
 pub fn main() !void {
+    eng.DefaultCamera.vel_slow = 64.0;
+    eng.DefaultCamera.vel_high = 1024.0;
+
     eng.level.load("levels/future/future.wmb");
+    // eng.level.load("levels/future/doorlft1.wmb");
+    // eng.level.load("levels/wmb6-demo.wmb");
 
     _ = eng.attach(eng.DefaultCamera);
 
     // _ = eng.entity.create("terrain.z3d", eng.nullvector, null);
 
     // _ = eng.entity.create("levels/test.wmb", eng.vector(0, 0, 0), _actions.Spinner);
-    const sprite = eng.entity.create("levels/future/arrows.tga", eng.vector(0, 0, 0), _actions.Spinner);
-    sprite.scale = eng.Vector3.all(0.01);
+    // const sprite = eng.entity.create("levels/future/arrows.tga", eng.vector(0, 0, 0), _actions.Spinner);
+    // sprite.scale = eng.Vector3.all(0.01);
 
-    const player = eng.entity.create("cube.z3d", eng.vector(0, 0, -10), _actions.Player);
-    _ = player.attach(_actions.YBouncer);
+    // const player = eng.entity.create("cube.z3d", eng.vector(0, 0, -10), _actions.Player);
+    // _ = player.attach(_actions.YBouncer);
 
     // var i: usize = 0;
     // while (i < 10) : (i += 1) {
