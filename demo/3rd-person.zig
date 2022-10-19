@@ -3,7 +3,7 @@ const eng = @import("basegame");
 
 pub fn main() !void {
     eng.DefaultCamera.vel_slow = 64.0;
-    eng.DefaultCamera.vel_high = 1024.0;
+    eng.DefaultCamera.vel_high = 256.0;
 
     eng.level.load("levels/future/future.wmb");
     // eng.level.load("levels/future/doorlft1.wmb");
@@ -14,6 +14,8 @@ pub fn main() !void {
     // _ = eng.entity.create("terrain.z3d", eng.nullvector, null);
 
     // _ = eng.entity.create("levels/test.wmb", eng.vector(0, 0, 0), _actions.Spinner);
+    // _ = eng.entity.create("levels/future/sign+5.tga", eng.vector(0, 0, 0), null);
+
     // const sprite = eng.entity.create("levels/future/arrows.tga", eng.vector(0, 0, 0), _actions.Spinner);
     // sprite.scale = eng.Vector3.all(0.01);
 

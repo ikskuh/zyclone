@@ -299,13 +299,20 @@ pub const RenderObject = union(RenderObjectType) {
     model: *zg.ResourceManager.Geometry,
 
     /// A flat, camera-oriented billboard.
-    sprite: *Texture,
+    sprite: Sprite,
 
     /// A level geometry constructed out of blocks.
     blocks: BlockGeometry,
 
     /// A heightmap geometry
     terrain: Terrain,
+};
+
+pub const Sprite = struct {
+    width: u15,
+    height: u15,
+    texture: *Texture,
+    frames: u15 = 1,
 };
 
 pub const Terrain = struct {
@@ -632,10 +639,22 @@ pub const @"__implementation" = struct {
                     });
 
                     switch (render_object) {
-                        .sprite => |texture| {
-                            try r3d.drawSprite(texture, trafo.fields);
+                        .sprite => |sprite| {
+                            if (sprite.frames > 1) {
+                                const total_frames = @floatToInt(u64, 8 * time.total);
+                                const current_frame = @truncate(u15, total_frames % sprite.frames);
 
-                            // @panic("sprite not supported yet");
+                                var rect = zg.Rectangle{
+                                    .x = current_frame * sprite.width,
+                                    .y = 0,
+                                    .width = sprite.width,
+                                    .height = sprite.height,
+                                };
+
+                                try r3d.drawPartialSprite(sprite.texture, rect, trafo.fields);
+                            } else {
+                                try r3d.drawSprite(sprite.texture, trafo.fields);
+                            }
                         },
                         .model => |geometry| try r3d.drawGeometry(geometry, trafo.fields),
                         .blocks => |blocks| {
@@ -824,7 +843,36 @@ pub const @"__implementation" = struct {
                     std.debug.assert(geometry_cache.remove(full_path));
                     return null;
                 };
-                break :blk .{ .sprite = tex };
+
+                const basename = std.fs.path.basename(path);
+                const rootname = basename[0 .. basename.len - std.fs.path.extension(basename).len];
+
+                // convert a sprite+N.tga into a frame counter
+                const frame_count = if (std.mem.lastIndexOfScalar(u8, rootname, '+')) |index| cnt: {
+                    var counter_str = rootname[index + 1 ..];
+                    while (counter_str.len > 0 and !std.ascii.isDigit(counter_str[counter_str.len - 1])) {
+                        counter_str = counter_str[0 .. counter_str.len - 1];
+                    }
+
+                    if (counter_str.len == 0)
+                        break :cnt 1;
+
+                    const counter = std.fmt.parseInt(u15, counter_str, 10) catch break :cnt 1;
+                    if (counter > 0) {
+                        break :cnt counter;
+                    } else {
+                        break :cnt 1;
+                    }
+                } else 1;
+
+                break :blk .{
+                    .sprite = Sprite{
+                        .width = @intCast(u15, tex.width / frame_count),
+                        .height = @intCast(u15, tex.height),
+                        .texture = tex,
+                        .frames = frame_count,
+                    },
+                };
             },
 
             .model => blk: {
