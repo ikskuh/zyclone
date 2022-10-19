@@ -733,8 +733,7 @@ pub const @"__implementation" = struct {
         return gop.value_ptr.*;
     }
 
-    fn loadRenderObject(dir: std.fs.Dir, path: []const u8) ?RenderObject {
-        const ext = std.fs.path.extension(path);
+    fn loadRenderObject(dir: std.fs.Dir, file_path: []const u8) ?RenderObject {
         const extension_map = .{
             .wmb = .blocks,
 
@@ -747,6 +746,52 @@ pub const @"__implementation" = struct {
 
             .hmp = .terrain,
         };
+
+        var path = file_path;
+
+        var temp_arena = std.heap.ArenaAllocator.init(mem.backing);
+        defer temp_arena.deinit();
+
+        if (path.len == 13 or path.len >= 32) {
+            // Workaround for shitty gamestudio file paths:
+            // file path might not contain full file name, so we
+            // have to figure out which file that is.
+
+            if (dir.statFile(path)) |_| {
+                // all goo, we know that the file exists
+            } else |err| {
+                if (err == error.FileNotFound) {
+                    var found_replacement = false;
+                    var iter_dir = dir.openIterableDir(std.fs.path.dirname(path) orelse ".", .{}) catch |e| panic(e);
+                    defer iter_dir.close();
+
+                    const basename = std.fs.path.basename(path);
+
+                    const original_path = path;
+
+                    var iter = iter_dir.iterate();
+                    while (iter.next() catch |e| panic(e)) |entry| {
+                        if (entry.kind != .File)
+                            continue;
+
+                        if (std.ascii.startsWithIgnoreCase(entry.name, basename)) {
+                            path = std.fs.path.join(temp_arena.allocator(), &.{ std.fs.path.dirname(path) orelse ".", entry.name }) catch oom();
+                            found_replacement = true;
+                            break;
+                        }
+                    }
+
+                    if (found_replacement) {
+                        std.log.info("Found shortened file name, resolved '{s}' to '{s}'", .{
+                            original_path,
+                            path,
+                        });
+                    }
+                }
+            }
+        }
+
+        const ext = std.fs.path.extension(path);
 
         const object_type: RenderObjectType = inline for (@typeInfo(@TypeOf(extension_map)).Struct.fields) |fld| {
             if (std.mem.eql(u8, ext, "." ++ fld.name))
