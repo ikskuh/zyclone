@@ -9,6 +9,17 @@ pub fn build(b: *std.build.Builder) void {
 
     const sdk = zpm.sdks.@"zero-graphics".init(b, use_android);
 
+    const ode = zpm.sdks.ode.init(b);
+    const ode_config = zpm.sdks.ode.Config{
+        .index_size = .u16,
+        .no_builtin_threading_impl = true,
+        .no_threading_intf = true,
+        .trimesh = .opcode,
+        .libccd = null,
+        .ou = false,
+        .precision = .single,
+    };
+
     const app = sdk.createApplication("3rd_person", "src/entrypoint.zig");
     app.setDisplayName("Acknex Clone");
     app.setPackageName("net.random_projects.games.acknex_clone");
@@ -18,6 +29,7 @@ pub fn build(b: *std.build.Builder) void {
 
     app.addPackage(zpm.pkgs.zlm);
     app.addPackage(zpm.pkgs.libgamestudio);
+    app.addPackage(ode.getPackage("ode", ode_config));
     app.addPackage(std.build.Pkg{
         .name = "@GAME@",
         .source = .{ .path = "demo/future.zig" },
@@ -28,6 +40,7 @@ pub fn build(b: *std.build.Builder) void {
     });
 
     const instance = app.compileFor(.{ .desktop = target });
+    ode.linkTo(instance.data.desktop, .static, ode_config);
     instance.install();
 
     if (use_android) {

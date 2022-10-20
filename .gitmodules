@@ -7,3 +7,6 @@
 [submodule "vendor/libgamestudio"]
 	path = vendor/libgamestudio
 	url = https://github.com/MasterQ32/libgamestudio.git
+[submodule "vendor/ode"]
+	path = vendor/ode
+	url = https://github.com/MasterQ32/zig-ode

@@ -2,14 +2,21 @@ const std = @import("std");
 const eng = @import("basegame");
 
 pub fn main() !void {
-    eng.DefaultCamera.vel_slow = 64.0;
-    eng.DefaultCamera.vel_high = 256.0;
+    // eng.DefaultCamera.vel_slow = 64.0;
+    // eng.DefaultCamera.vel_high = 256.0;
 
-    eng.level.load("levels/future/future.wmb");
+    eng.level.load(null);
+
+    // eng.level.load("levels/future/future.wmb");
     // eng.level.load("levels/import-test/flagtest.wmb");
+    // eng.level.load("levels/import-test/regions.wmb");
+    // eng.level.load("levels/import-test/lights.wmb");
+    // eng.level.load("levels/import-test/paths.wmb");
 
     _ = eng.attach(eng.DefaultCamera);
     _ = eng.attach(eng.DebugPanels);
+
+    eng.camera.pos.z = 10;
 
     // eng.level.load("levels/future/doorlft1.wmb");
     // eng.level.load("levels/wmb6-demo.wmb");
@@ -30,8 +37,22 @@ pub fn main() !void {
     //     eng.waitForFrame();
     // }
 
+    const ball = eng.Entity.create("3ball.mdl", eng.vector(0, 3, 0), Kicker);
+    ball.scale = eng.Vector3.all(1.0 / 16.0);
+    ball.setPhysicsType();
+
     // return error.Poop;
 }
+
+const Kicker = struct {
+    pub fn update(ent: *eng.Entity, _: *@This()) void {
+        if (eng.key.pressed(.space)) {
+            var kick_dir = eng.vec.forAngle(.{ .pan = eng.camera.rot.pan, .tilt = 0, .roll = 0 });
+            kick_dir.y = 0.7;
+            ent.addForceCentral(kick_dir.scale(100));
+        }
+    }
+};
 
 /// Exposing a global namespace "actions"
 /// will allow the engine to actually instantiate

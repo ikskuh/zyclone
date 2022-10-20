@@ -12,7 +12,12 @@ pub const pkgs = struct {
         .name = "zlm",
         .source = .{ .path = "vendor/zlm/zlm.zig" },
     };
+    pub const ode = std.build.Pkg{
+        .name = "ode",
+        .source = .{ .path = "vendor/ode/src/ode.zig" },
+    };
 };
 pub const sdks = struct {
     pub const @"zero-graphics" = @import("vendor/zero-graphics/Sdk.zig");
+    pub const ode = @import("vendor/ode/Sdk.zig");
 };

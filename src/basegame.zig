@@ -4,6 +4,7 @@ const zg = @import("zero-graphics");
 const main = @import("entrypoint.zig");
 const gamestudio = @import("libgamestudio");
 const game = @import("@GAME@");
+const ode = @import("ode");
 
 fn core() *zg.CoreApplication {
     return zg.CoreApplication.get();
@@ -23,6 +24,20 @@ pub const BoundingBox = struct {
     pub fn insert(bb: *BoundingBox, in: Vector3) void {
         bb.min = Vector3.componentMin(bb.min, in);
         bb.max = Vector3.componentMax(bb.max, in);
+    }
+
+    pub fn contains(bb: BoundingBox, v: Vector3) bool {
+        if (v.x < bb.min.x) return false;
+        if (v.y < bb.min.y) return false;
+        if (v.z < bb.min.z) return false;
+        if (v.x >= bb.max.x) return false;
+        if (v.y >= bb.max.y) return false;
+        if (v.z >= bb.max.z) return false;
+        return true;
+    }
+
+    pub fn extends(bb: BoundingBox) Vector3 {
+        return bb.max.sub(bb.min).abs();
     }
 
     pub const empty = BoundingBox{ .min = Vector3.zero, .max = Vector3.zero };
@@ -93,7 +108,7 @@ pub const mem = struct {
 };
 
 pub const Path = struct {
-    var all_paths: std.TailQueue(void) = .{};
+    var all: std.TailQueue(void) = .{};
 
     link: std.TailQueue(void).Node = .{ .data = {} },
 
@@ -109,12 +124,12 @@ pub const Path = struct {
         for (path.nodes) |*node| {
             node.* = Node{ .pos = nullvector };
         }
-        all_paths.append(&path.link);
+        all.append(&path.link);
         return path;
     }
 
     pub fn destroy(path: *Path) void {
-        all_paths.remove(&path.link);
+        all.remove(&path.link);
         level.free(path.nodes);
         level.destroy(path);
     }
@@ -155,12 +170,52 @@ pub const Path = struct {
     };
 };
 
+pub const Region = struct {
+    var all: std.TailQueue(void) = .{};
+
+    link: std.TailQueue(void).Node = .{ .data = {} },
+
+    name: []const u8,
+    bounds: BoundingBox,
+
+    pub fn contains(name: []const u8, v: Vector3) bool {
+        var it = all.first;
+        while (it) |node| : (it = node.next) {
+            const region = @fieldParentPtr(Region, "link", &node);
+            if (std.mem.eql(u8, region.name, name) and region.bounds.contains(v))
+                return true;
+        }
+
+        return false;
+    }
+
+    pub fn create(name: []const u8, box: BoundingBox) *Region {
+        const item = level.create(Region);
+        item.* = Region{
+            .name = level.allocator().dupe(u8, name) catch oom(),
+            .bounds = box,
+        };
+        all.append(&item.link);
+        return item;
+    }
+
+    pub fn destroy(region: *Path) void {
+        all.remove(&region.link);
+        level.free(region.name);
+        level.destroy(region);
+    }
+};
+
 pub const level = struct {
     var arena: std.heap.ArenaAllocator = undefined;
     var entity_list: std.TailQueue(Entity) = .{};
     var level_behaviours: BehaviourSystem(level, void) = .{};
 
     var palette: ?gamestudio.wmb.Palette = null;
+
+    pub fn allocator() std.mem.Allocator {
+        return arena.allocator();
+    }
 
     pub const EntityIterator = struct {
         pub const Options = struct {
@@ -222,6 +277,8 @@ pub const level = struct {
         entity_list = .{};
         level_behaviours = .{};
         level.palette = null;
+        Path.all = .{};
+        Region.all = .{};
 
         if (path) |real_path| {
             var level_dir = std.fs.cwd().openDir(std.fs.path.dirname(real_path) orelse ".", .{}) catch |err| panic(err);
@@ -337,7 +394,12 @@ pub const level = struct {
                             });
                         }
                     },
-                    .region => std.log.warn("TODO: Implement loading of region object.", .{}),
+                    .region => |def| {
+                        _ = Region.create(def.name.get(), BoundingBox{
+                            .min = vec.make(def.minimum),
+                            .max = vec.make(def.maximum),
+                        });
+                    },
                 }
             }
         }
@@ -407,7 +469,7 @@ pub const Entity = struct {
     };
     const Behaviours = BehaviourSystem(level, *Entity);
 
-    // public:
+    // generic:
     pos: Vector3 = nullvector,
     scale: Vector3 = zlm.Vec3.one,
     rot: Angle = Angle.zero,
@@ -416,11 +478,14 @@ pub const Entity = struct {
     skills: [20]f32 = std.mem.zeroes([20]f32),
     flags: Flags = .{},
 
-    // visuals
+    // visuals:
     geometry: ?RenderObject = null,
     lightmap: ?*Texture = null,
     bounds: BoundingBox = BoundingBox.empty,
     light: ?Light = null,
+
+    // physics:
+    body: ?Body = null,
 
     // private:
     behaviours: Behaviours = .{},
@@ -466,6 +531,32 @@ pub const Entity = struct {
         level.entities.remove(node);
     }
 
+    // generic
+
+    pub fn getWorldTransform(ent: Entity) Matrix4 {
+        const mat_pos = zlm.Mat4.createTranslation(ent.pos);
+        const mat_rot = if (ent.body) |body| blk: {
+            const body_mat = ode.dBodyGetRotation(body)[0..12];
+            break :blk (Matrix4{
+                .fields = .{
+                    .{ body_mat[0], body_mat[1], body_mat[2], body_mat[3] },
+                    .{ body_mat[4], body_mat[5], body_mat[6], body_mat[7] },
+                    .{ body_mat[8], body_mat[9], body_mat[10], body_mat[11] },
+                    .{ 0, 0, 0, 1 },
+                },
+            }).transpose();
+        } else mat.forAngle(ent.rot);
+        const mat_scale = zlm.Mat4.createScale(ent.scale.x, ent.scale.y, ent.scale.z);
+
+        return zlm.Mat4.batchMul(&.{
+            mat_scale,
+            mat_rot,
+            mat_pos,
+        });
+    }
+
+    // behaviours
+
     pub fn attach(ent: *Entity, comptime Behaviour: type) *Behaviour {
         return ent.behaviours.attach(ent, Behaviour);
     }
@@ -476,6 +567,38 @@ pub const Entity = struct {
 
     pub fn detach(ent: *Entity, comptime Behaviour: type) void {
         return ent.behaviours.detach(Behaviour);
+    }
+
+    // physics
+
+    pub fn setPhysicsType(ent: *Entity) void {
+        if (ent.body) |body| {
+            ode.dBodyDestroy(body);
+        }
+
+        var real_bb = BoundingBox{
+            .min = ent.bounds.min.mul(ent.scale),
+            .max = ent.bounds.max.mul(ent.scale),
+        };
+        const extends = real_bb.extends();
+        const radius = std.math.max3(extends.x, extends.y, extends.z) / 2.0;
+
+        const body = ode.dBodyCreate(physics.world);
+        const geom = ode.dCreateSphere(physics.space, radius);
+
+        var m: ode.dMass = undefined;
+        ode.dMassSetSphere(&m, 0.1, radius);
+        ode.dBodySetMass(body, &m);
+
+        ode.dGeomSetBody(geom, body);
+        ode.dBodySetPosition(body, ent.pos.x, ent.pos.y, ent.pos.z);
+
+        ent.body = body;
+    }
+
+    pub fn addForceCentral(ent: *Entity, force: Vector3) void {
+        const body = ent.body orelse @panic("not a physics body");
+        ode.dBodyAddForce(body, force.x, force.y, force.z);
     }
 
     // predicates
@@ -490,6 +613,10 @@ pub const Entity = struct {
 
     pub fn hasAnyBehaviour(ent: *Entity) bool {
         return (ent.behaviours.list.len > 0);
+    }
+
+    pub fn isRigidBody(ent: *Entity) bool {
+        return (ent.body != null); // TODO: Consider kinematic body
     }
 };
 
@@ -657,7 +784,9 @@ pub const View = struct {
     }
 };
 
-pub var camera: View = .{};
+var camera_backing: View = .{};
+
+pub const camera = &camera_backing;
 
 pub const Key = zg.Input.Scancode;
 
@@ -764,7 +893,7 @@ pub const vec = struct {
     }
 
     pub fn toScreen(v: Vector3, view: ?*View) ?Vector3 {
-        const actual_view = (view orelse &camera);
+        const actual_view = (view orelse camera);
         const trafo = actual_view.getViewProjectionMatrix();
 
         const affine_world = v.toAffinePosition();
@@ -811,42 +940,10 @@ pub const DebugPanels = struct {
             while (it.next()) |ent| {
                 draw.cross3D(ent.pos, 5.0, Color.red);
 
-                const min = ent.bounds.min;
-                const max = ent.bounds.max;
-
-                var corners = [8]Vector3{
-                    vector(min.x, min.y, min.z),
-                    vector(min.x, min.y, max.z),
-                    vector(min.x, max.y, min.z),
-                    vector(min.x, max.y, max.z),
-                    vector(max.x, min.y, min.z),
-                    vector(max.x, min.y, max.z),
-                    vector(max.x, max.y, min.z),
-                    vector(max.x, max.y, max.z),
-                };
-
-                for (corners) |*c| {
-                    const v = c.*;
-                    c.* = vec.rotate(v.mul(ent.scale), ent.rot).add(ent.pos);
-                }
-
-                const outlines = [12][2]usize{
-                    .{ 0, 1 },
-                    .{ 0, 2 },
-                    .{ 2, 3 },
-                    .{ 1, 3 },
-                    .{ 4, 5 },
-                    .{ 4, 6 },
-                    .{ 5, 7 },
-                    .{ 6, 7 },
-                    .{ 0, 4 },
-                    .{ 1, 5 },
-                    .{ 2, 6 },
-                    .{ 3, 7 },
-                };
-                for (outlines) |line| {
-                    draw.line3D(corners[line[0]], corners[line[1]], Color.red);
-                }
+                draw.obb(ent.pos, ent.rot, BoundingBox{
+                    .min = ent.bounds.min.mul(ent.scale),
+                    .max = ent.bounds.max.mul(ent.scale),
+                }, Color.red);
             }
         }
         if (pan.show_lights) {
@@ -868,10 +965,14 @@ pub const DebugPanels = struct {
         }
 
         if (pan.show_regions) {
-            //
+            var it = Region.all.first;
+            while (it) |node| : (it = node.next) {
+                const region = @fieldParentPtr(Region, "link", node);
+                draw.aabb(region.bounds, Color.lime);
+            }
         }
         if (pan.show_paths) {
-            var it = Path.all_paths.first;
+            var it = Path.all.first;
             while (it) |node| : (it = node.next) {
                 const path = @fieldParentPtr(Path, "link", node);
 
@@ -979,8 +1080,8 @@ pub const DebugPanels = struct {
             Layout.item(pan, content_rect, 1, 1, "  vis = {d}", .{level.entities(.{ .filter = Entity.isVisible }).count()});
             Layout.item(pan, content_rect, 2, 1, "light = {d}", .{level.entities(.{ .filter = Entity.isLight }).count()});
             Layout.item(pan, content_rect, 3, 1, "behav = {d}", .{level.entities(.{ .filter = Entity.hasAnyBehaviour }).count()});
-            Layout.item(pan, content_rect, 4, 1, "paths = {d}", .{Path.all_paths.len});
-            Layout.item(pan, content_rect, 5, 1, "regio = {d}", .{0}); // TODO: Set region counter here
+            Layout.item(pan, content_rect, 4, 1, "paths = {d}", .{Path.all.len});
+            Layout.item(pan, content_rect, 5, 1, "regio = {d}", .{Region.all.len});
         }
 
         if (pan.controls_visible) {
@@ -1089,6 +1190,60 @@ pub const DefaultCamera = struct {
 pub const draw = struct {
     pub var default_font: *const zg.Renderer2D.Font = undefined;
 
+    const box_edges = [12][2]usize{
+        .{ 0, 1 },
+        .{ 0, 2 },
+        .{ 2, 3 },
+        .{ 1, 3 },
+        .{ 4, 5 },
+        .{ 4, 6 },
+        .{ 5, 7 },
+        .{ 6, 7 },
+        .{ 0, 4 },
+        .{ 1, 5 },
+        .{ 2, 6 },
+        .{ 3, 7 },
+    };
+
+    pub fn aabb(box: BoundingBox, color: Color) void {
+        var corners = [8]Vector3{
+            vector(box.min.x, box.min.y, box.min.z),
+            vector(box.min.x, box.min.y, box.max.z),
+            vector(box.min.x, box.max.y, box.min.z),
+            vector(box.min.x, box.max.y, box.max.z),
+            vector(box.max.x, box.min.y, box.min.z),
+            vector(box.max.x, box.min.y, box.max.z),
+            vector(box.max.x, box.max.y, box.min.z),
+            vector(box.max.x, box.max.y, box.max.z),
+        };
+
+        for (box_edges) |edge| {
+            draw.line3D(corners[edge[0]], corners[edge[1]], color);
+        }
+    }
+
+    pub fn obb(center: Vector3, rotation: Angle, box: BoundingBox, color: Color) void {
+        var corners = [8]Vector3{
+            vector(box.min.x, box.min.y, box.min.z),
+            vector(box.min.x, box.min.y, box.max.z),
+            vector(box.min.x, box.max.y, box.min.z),
+            vector(box.min.x, box.max.y, box.max.z),
+            vector(box.max.x, box.min.y, box.min.z),
+            vector(box.max.x, box.min.y, box.max.z),
+            vector(box.max.x, box.max.y, box.min.z),
+            vector(box.max.x, box.max.y, box.max.z),
+        };
+
+        for (corners) |*c| {
+            const v = c.*;
+            c.* = vec.rotate(v, rotation).add(center);
+        }
+
+        for (box_edges) |edge| {
+            draw.line3D(corners[edge[0]], corners[edge[1]], color);
+        }
+    }
+
     pub fn line3D(from: Vector3, to: Vector3, color: Color) void {
         __implementation.debug3d.drawLine(@bitCast([3]f32, from), @bitCast([3]f32, to), color) catch oom();
     }
@@ -1178,6 +1333,130 @@ pub const ui = struct {
     }
 };
 
+pub const Body = ode.dBodyID;
+pub const Collider = ode.dGeomID;
+
+pub const physics = struct {
+    var world: ode.dWorldID = undefined;
+    var space: ode.dSpaceID = undefined;
+    var contactgroup: ode.dJointGroupID = undefined;
+
+    const Contact = struct {
+        normal: Vector3,
+        position: Vector3,
+        creation_time: f32,
+    };
+
+    var contacts: std.ArrayList(Contact) = undefined;
+
+    // this is called by dSpaceCollide when two objects in space are
+    // potentially colliding.
+    fn nearCallback(data: ?*anyopaque, o1: ode.dGeomID, o2: ode.dGeomID) callconv(.C) void {
+        _ = data;
+
+        const b1: ode.dBodyID = ode.dGeomGetBody(o1);
+        const b2: ode.dBodyID = ode.dGeomGetBody(o2);
+        var contact: ode.dContact = undefined;
+        contact.surface.mode = ode.dContactBounce | ode.dContactSoftCFM;
+        // friction parameter
+        contact.surface.mu = ode.dInfinity;
+        contact.surface.rho = 10.0;
+        // bounce is the amount of "bouncyness".
+        contact.surface.bounce = 0.9;
+        // bounce_vel is the minimum incoming velocity to cause a bounce
+        contact.surface.bounce_vel = 0.1;
+        // constraint force mixing parameter
+        contact.surface.soft_cfm = 0.001;
+
+        const numc = ode.dCollide(o1, o2, 1, &contact.geom, @sizeOf(ode.dContact));
+        if (numc != 0) {
+            contacts.append(Contact{
+                .position = vec.make(contact.geom.pos),
+                .normal = vec.make(contact.geom.normal),
+                .creation_time = time.total,
+            }) catch oom();
+
+            var c: ode.dJointID = ode.dJointCreateContact(world, contactgroup, &contact);
+            ode.dJointAttach(c, b1, b2);
+        }
+    }
+
+    fn init() void {
+        contacts = std.ArrayList(Contact).init(mem.backing);
+
+        // create world
+        ode.dInitODE();
+        world = ode.dWorldCreate();
+        space = ode.dHashSpaceCreate(null);
+        ode.dWorldSetGravity(world, 0, -9.81, 0.0);
+        ode.dWorldSetCFM(world, 1e-5);
+        contactgroup = ode.dJointGroupCreate(0);
+
+        _ = ode.dCreatePlane(space, 0, 1, 0, -3);
+    }
+
+    var total_time: f32 = 0;
+
+    fn update() void {
+        const physics_time_step = 0.01; // run with 100 Hz
+
+        while (total_time < time.total) : (total_time += physics_time_step) {
+
+            // find collisions and add contact joints
+            ode.dSpaceCollide(space, null, &nearCallback);
+            // step the simulation
+            _ = ode.dWorldQuickStep(world, physics_time_step);
+            // remove all contact joints
+            ode.dJointGroupEmpty(contactgroup);
+        }
+
+        // copy back physics properties to entities
+        {
+            var it = level.entities(.{ .filter = Entity.isRigidBody });
+            while (it.next()) |ent| {
+                const body = ent.body orelse unreachable; // isRigidBody lied to us!
+
+                const pos = ode.dBodyGetPosition(body)[0..3];
+
+                ent.pos = vec.make(pos.*);
+
+                // // const R = ode.dBodyGetPosition(body)[0..3];
+
+                // draw.position3D(vec.make(pos.*), 0.5, Color.white);
+
+            }
+        }
+
+        // draw.circle3D(vector(0, -3, 0), Vector3.unitY, 1.0, Color.gray(128));
+        // draw.circle3D(vector(0, -3, 0), Vector3.unitY, 2.0, Color.gray(128));
+        // draw.circle3D(vector(0, -3, 0), Vector3.unitY, 3.0, Color.gray(128));
+
+        {
+            var i: usize = 0;
+            while (i < contacts.items.len) {
+                const item = contacts.items[i];
+                const lifetime = time.total - item.creation_time;
+                const max_lifetime = 5.0;
+
+                if (lifetime >= max_lifetime) {
+                    _ = contacts.swapRemove(i);
+                } else {
+                    i += 1;
+                    draw.circle3D(item.position, item.normal, lifetime, Color.gray(128));
+                }
+            }
+        }
+    }
+
+    fn deinit() void {
+        // clean up
+        ode.dJointGroupDestroy(contactgroup);
+        ode.dSpaceDestroy(space);
+        ode.dWorldDestroy(world);
+        ode.dCloseODE();
+    }
+};
+
 /// do not use this!
 /// it's meant for internal use of the engine
 pub const __implementation = struct {
@@ -1198,6 +1477,8 @@ pub const __implementation = struct {
 
     pub fn init(app: *Application) !void {
         app.* = .{};
+
+        physics.init();
 
         r2d = try core().resources.createRenderer2D();
         r3d = try core().resources.createRenderer3D();
@@ -1317,20 +1598,17 @@ pub const __implementation = struct {
         if (quit_now)
             return false;
 
+        // Update physics
+        {
+            physics.update();
+        }
+
         // render all entities
         {
             var it: level.EntityIterator = level.entities(.{ .filter = Entity.isVisible });
             while (it.next()) |ent| {
                 if (ent.geometry) |render_object| {
-                    const mat_pos = zlm.Mat4.createTranslation(ent.pos);
-                    const mat_rot = mat.forAngle(ent.rot);
-                    const mat_scale = zlm.Mat4.createScale(ent.scale.x, ent.scale.y, ent.scale.z);
-
-                    const trafo = zlm.Mat4.batchMul(&.{
-                        mat_scale,
-                        mat_rot,
-                        mat_pos,
-                    });
+                    const trafo = ent.getWorldTransform();
 
                     switch (render_object) {
                         .sprite => |sprite| {
@@ -1401,6 +1679,8 @@ pub const __implementation = struct {
                 mem.backing.free(file_name.*);
             }
         }
+
+        physics.deinit();
 
         geometry_cache.deinit(mem.backing);
         texture_cache.deinit(mem.backing);
