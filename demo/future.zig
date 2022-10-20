@@ -37,7 +37,41 @@ pub fn main() !void {
 /// will allow the engine to actually instantiate
 /// these actions in entities loaded from a level.
 /// Every pub structure in here can be loaded.
-pub const _actions = struct {
+pub const actions = struct {
+    pub const FXA_LightBlink = struct {
+        pub fn update(ent: *eng.Entity, _: *@This()) void {
+            if (eng.key.held(.@"1")) {
+                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
+            }
+        }
+    };
+
+    pub const a = struct {
+        pub fn update(ent: *eng.Entity, _: *@This()) void {
+            if (eng.key.held(.@"2")) {
+                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
+            }
+        }
+    };
+
+    /// - The trigger that opens the door to the final room
+    /// - The sprite before the locked room
+    pub const ga = struct {
+        pub fn update(ent: *eng.Entity, _: *@This()) void {
+            if (eng.key.held(.@"3")) {
+                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
+            }
+        }
+    };
+
+    pub const @".wmb" = struct {
+        pub fn update(ent: *eng.Entity, _: *@This()) void {
+            if (eng.key.held(.@"3")) {
+                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
+            }
+        }
+    };
+
     pub const Player = struct {
         health: u32 = 100,
         shield: u32 = 0,

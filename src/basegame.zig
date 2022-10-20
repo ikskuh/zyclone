@@ -92,6 +92,69 @@ pub const mem = struct {
     }
 };
 
+pub const Path = struct {
+    var all_paths: std.TailQueue(void) = .{};
+
+    link: std.TailQueue(void).Node = .{ .data = {} },
+
+    nodes: []Node,
+
+    pub fn create(nodes: usize) *Path {
+        if (nodes < 2)
+            @panic("A path must have at least 2 nodes!");
+        const path = level.create(Path);
+        path.* = Path{
+            .nodes = level.alloc(Node, nodes),
+        };
+        for (path.nodes) |*node| {
+            node.* = Node{ .pos = nullvector };
+        }
+        all_paths.append(&path.link);
+        return path;
+    }
+
+    pub fn destroy(path: *Path) void {
+        all_paths.remove(&path.link);
+        level.free(path.nodes);
+        level.destroy(path);
+    }
+
+    pub fn length(path: Path) f32 {
+        var len: f32 = 0;
+        var start = path.nodes[0].pos;
+        for (path.nodes[1..]) |end| {
+            defer start = end.pos;
+            len += Vector3.distance(start, end.pos);
+        }
+        return len;
+    }
+
+    /// Returns the position on the `path`, given a `position` between `0.0` and `1.0`.
+    pub fn lerp(path: Path, position: f32) Vector3 {
+        const total = path.length();
+        var len: f32 = 0;
+        var start = path.nodes[0].pos;
+        for (path.nodes[1..]) |end| {
+            defer start = end.pos;
+            const seglen = Vector3.distance(start, end.pos);
+
+            const rel_start = len / total;
+            const rel_end = (len + seglen) / total;
+            if (position >= rel_start and position <= rel_end) {
+                return Vector3.lerp(start, end.pos, (position - rel_start) / (rel_end - rel_start));
+            }
+
+            len += seglen;
+        }
+        return path.nodes[path.nodes.len - 1].pos;
+    }
+
+    pub const Node = struct {
+        pos: Vector3,
+        params: [6]f32 = std.mem.zeroes([6]f32),
+    };
+};
+
 pub const level = struct {
     var arena: std.heap.ArenaAllocator = undefined;
     var entity_list: std.TailQueue(Entity) = .{};
@@ -120,6 +183,13 @@ pub const level = struct {
                 return ent;
             }
             return null;
+        }
+
+        pub fn count(iter: EntityIterator) usize {
+            var clone = iter;
+            var i: usize = 0;
+            while (clone.next()) |_| : (i += 1) {}
+            return i;
         }
     };
 
@@ -179,7 +249,7 @@ pub const level = struct {
 
             // Create an entity that will be our "map"
 
-            const map_ent = entity.create(null, nullvector, null);
+            const map_ent = Entity.create(null, nullvector, null);
             map_ent.geometry = .{ .blocks = block_geometry };
 
             for (level_data.objects) |object, oid| {
@@ -187,25 +257,39 @@ pub const level = struct {
                     .position => std.log.warn("TODO: Implement loading of position object.", .{}),
                     .light => |light| {
                         if (light.flags.dynamic) {
-                            const ent = entity.create(null, vec.make(light.origin), null);
-                            ent.light = Light{
-                                .color = wmb2col(light.color),
-                                .range = light.range,
-                                .cast = light.flags.cast,
-                            };
-                        } else {
-                            const ent = entity.create(null, vec.make(light.origin), null);
+                            const ent = Entity.create(null, vec.make(light.origin), null);
                             ent.light = Light{
                                 .color = wmb2col(light.color),
                                 .range = light.range,
                                 .cast = light.flags.cast,
                             };
                         }
+                        // else {
+                        //     const ent = entity.create(null, vec.make(light.origin), null);
+                        //     ent.light = Light{
+                        //         .color = wmb2col(light.color),
+                        //         .range = light.range,
+                        //         .cast = light.flags.cast,
+                        //     };
+                        // }
                     },
                     .sound => std.log.warn("TODO: Implement loading of sound object.", .{}),
-                    .path => std.log.warn("TODO: Implement loading of path object.", .{}),
+                    .path => |def| {
+                        if (def.edges.len < 1) {
+                            std.log.warn("Deformed path {} found. Expected at least 1 edge, got none!", .{def.name});
+                            continue;
+                        }
+
+                        // TODO: Fix this
+
+                        const wmb_path = Path.create(def.edges.len + 1);
+                        wmb_path.nodes[0].pos = vec.make(def.points[def.edges[0].node1].position);
+                        for (def.edges) |edge, i| {
+                            wmb_path.nodes[i + 1].pos = vec.make(def.points[edge.node2].position);
+                        }
+                    },
                     .entity => |def| {
-                        const ent = entity.createAt(level_dir, def.file_name.get(), wmb2vec(def.origin), null);
+                        const ent = Entity.createAt(level_dir, def.file_name.get(), wmb2vec(def.origin), null);
                         ent.rot = Angle{ .pan = def.angle.pan, .tilt = def.angle.tilt, .roll = def.angle.roll };
                         ent.scale = wmb2vec(def.scale);
                         ent.skills = def.skills;
@@ -244,9 +328,7 @@ pub const level = struct {
                         if (@hasDecl(game, "actions")) {
                             var iter = std.mem.tokenize(u8, def.action.get(), ", ");
                             while (iter.next()) |action_name| {
-                                _ = action_name;
-
-                                //
+                                addNamedBehaviour(ent, action_name);
                             }
                         } else if (def.action.len() > 0) {
                             std.log.warn("Entity '{s}' has an action '{s}', but there's no global action list available.", .{
@@ -259,6 +341,20 @@ pub const level = struct {
                 }
             }
         }
+    }
+
+    fn addNamedBehaviour(ent: *Entity, name: []const u8) void {
+        inline for (@typeInfo(game.actions).Struct.decls) |decl| {
+            if (std.mem.eql(u8, decl.name, name)) {
+                if (decl.is_pub) {
+                    _ = ent.attach(@field(game.actions, decl.name));
+                } else {
+                    std.log.warn("Tried to attach action {s} to entity, but it's private!", .{decl.name});
+                }
+                return;
+            }
+        }
+        std.log.warn("Could not find an action called {s}.", .{name});
     }
 
     pub fn create(comptime T: type) *T {
@@ -287,44 +383,6 @@ pub const level = struct {
 
     pub fn detach(comptime Behaviour: type) void {
         return level_behaviours.detach(Behaviour);
-    }
-};
-
-pub const entity = struct {
-    pub fn create(file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
-        return createAt(std.fs.cwd(), file, position, Behaviour);
-    }
-
-    pub fn createAt(folder: std.fs.Dir, file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
-        const ent = level.create(std.TailQueue(Entity).Node);
-        ent.* = .{
-            .data = Entity{
-                .pos = position,
-            },
-        };
-
-        if (file) |actual_file_path| {
-            if (@"__implementation".loadRenderObject(folder, actual_file_path)) |geom| {
-                ent.data.geometry = geom;
-                ent.data.bounds = geom.computeBounds();
-            } else {
-                std.log.err("could not find entity '{s}'", .{actual_file_path});
-            }
-        }
-
-        if (Behaviour) |ActualBehaviour| {
-            _ = ent.data.attach(ActualBehaviour);
-        }
-
-        level.entity_list.append(ent);
-
-        if (ent.data.geometry) |geom| {
-            if (geom == .blocks and geom.blocks.level.objects.len > 1) {
-                std.log.warn("didn't load {} sub objects for {s}", .{ geom.blocks.level.objects.len, file.? });
-            }
-        }
-
-        return &ent.data;
     }
 };
 
@@ -367,6 +425,42 @@ pub const Entity = struct {
     // private:
     behaviours: Behaviours = .{},
 
+    pub fn create(file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
+        return createAt(std.fs.cwd(), file, position, Behaviour);
+    }
+
+    pub fn createAt(folder: std.fs.Dir, file: ?[]const u8, position: Vector3, comptime Behaviour: ?type) *Entity {
+        const ent = level.create(std.TailQueue(Entity).Node);
+        ent.* = .{
+            .data = Entity{
+                .pos = position,
+            },
+        };
+
+        if (file) |actual_file_path| {
+            if (@"__implementation".loadRenderObject(folder, actual_file_path)) |geom| {
+                ent.data.geometry = geom;
+                ent.data.bounds = geom.computeBounds();
+            } else {
+                std.log.err("could not find entity '{s}'", .{actual_file_path});
+            }
+        }
+
+        if (Behaviour) |ActualBehaviour| {
+            _ = ent.data.attach(ActualBehaviour);
+        }
+
+        level.entity_list.append(ent);
+
+        if (ent.data.geometry) |geom| {
+            if (geom == .blocks and geom.blocks.level.objects.len > 1) {
+                std.log.warn("didn't load {} sub objects for {s}", .{ geom.blocks.level.objects.len, file.? });
+            }
+        }
+
+        return &ent.data;
+    }
+
     pub fn destroy(e: *Entity) void {
         const node = @fieldParentPtr(std.TailQueue(Entity).Node, "data", e);
         level.entities.remove(node);
@@ -392,6 +486,10 @@ pub const Entity = struct {
 
     pub fn isLight(ent: *Entity) bool {
         return (ent.light != null) and ent.flags.visible;
+    }
+
+    pub fn hasAnyBehaviour(ent: *Entity) bool {
+        return (ent.behaviours.list.len > 0);
     }
 };
 
@@ -641,6 +739,8 @@ pub const screen = struct {
 };
 
 pub const DebugPanels = struct {
+    var font: *const zg.Renderer2D.Font = undefined;
+
     controls_visible: bool = false,
     states_visible: bool = false,
 
@@ -648,39 +748,13 @@ pub const DebugPanels = struct {
     show_lights: bool = false,
     show_regions: bool = false,
     show_paths: bool = false,
-
-    fn drawCross(center: Vector3, size: f32, color: Color) void {
-        draw.line3D(center.sub(vector(size, 0, 0)), center.add(vector(size, 0, 0)), color);
-        draw.line3D(center.sub(vector(0, size, 0)), center.add(vector(0, size, 0)), color);
-        draw.line3D(center.sub(vector(0, 0, size)), center.add(vector(0, 0, size)), color);
-    }
-
-    fn drawCircle(center: Vector3, normal: Vector3, radius: f32, color: Color) void {
-        const candidate_a = Vector3.cross(normal, Vector3.unitX);
-        const tangent = if (candidate_a.length2() < 0.1 or @fabs(Vector3.dot(candidate_a, normal)) > 0.9) // basically linear
-            Vector3.cross(normal, Vector3.unitZ).normalize()
-        else
-            candidate_a.normalize();
-
-        const cotangent = Vector3.cross(tangent, normal).normalize();
-
-        var prev: Vector3 = center.add(tangent.scale(radius));
-
-        var i: usize = 10;
-        while (i <= 360) : (i += 10) {
-            const a = std.math.pi * @intToFloat(f32, i) / 180.0;
-            var current = center.add(tangent.scale(radius * @cos(a))).add(cotangent.scale(radius * @sin(a)));
-            defer prev = current;
-
-            draw.line3D(prev, current, color);
-        }
-    }
+    show_behaviours: bool = false,
 
     pub fn update(pan: *@This()) void {
         if (pan.show_entities) {
             var it = level.entities(.{ .filter = Entity.isVisible });
             while (it.next()) |ent| {
-                drawCross(ent.pos, 5.0, Color.red);
+                draw.cross3D(ent.pos, 5.0, Color.red);
 
                 const min = ent.bounds.min;
                 const max = ent.bounds.max;
@@ -723,7 +797,7 @@ pub const DebugPanels = struct {
         if (pan.show_lights) {
             var it = level.entities(.{ .filter = Entity.isLight });
             while (it.next()) |ent| {
-                drawCross(ent.pos, 5.0, Color.yellow);
+                draw.position3D(ent.pos, 5.0, Color.yellow);
 
                 const light: Light = ent.light.?;
 
@@ -731,12 +805,9 @@ pub const DebugPanels = struct {
                     _ = spot;
                     std.log.err("spotlight visualization not done yet.", .{});
                 } else {
-                    drawCircle(ent.pos, Vector3.unitX, 10, Color.yellow);
-                    drawCircle(ent.pos, Vector3.unitY, 10, Color.yellow);
-                    drawCircle(ent.pos, Vector3.unitZ, 10, Color.yellow);
-                    drawCircle(ent.pos, Vector3.unitX, light.range, Color.yellow);
-                    drawCircle(ent.pos, Vector3.unitY, light.range, Color.yellow);
-                    drawCircle(ent.pos, Vector3.unitZ, light.range, Color.yellow);
+                    draw.circle3D(ent.pos, Vector3.unitX, light.range, Color.yellow);
+                    draw.circle3D(ent.pos, Vector3.unitY, light.range, Color.yellow);
+                    draw.circle3D(ent.pos, Vector3.unitZ, light.range, Color.yellow);
                 }
             }
         }
@@ -745,7 +816,21 @@ pub const DebugPanels = struct {
             //
         }
         if (pan.show_paths) {
-            //
+            var it = Path.all_paths.first;
+            while (it) |node| : (it = node.next) {
+                const path = @fieldParentPtr(Path, "link", node);
+
+                var start = path.nodes[0];
+                for (path.nodes[1..]) |end| {
+                    defer start = end;
+
+                    draw.line3D(start.pos, end.pos, Color.blue);
+                }
+
+                const rel_pos = @mod(time.total, 10.0); // sweep each path in X seconds
+
+                draw.position3D(path.lerp(rel_pos / 10.0), 5.0, Color.white);
+            }
         }
 
         if (key.pressed(.f12)) {
@@ -756,21 +841,10 @@ pub const DebugPanels = struct {
         }
 
         if (pan.states_visible) {
-            const panel_rect = Rectangle{
-                .x = 10,
-                .y = 10,
-                .width = 300,
-                .height = 140,
-            };
-
-            ui.panel(panel_rect, .{});
-
-            const content_rect = panel_rect.shrink(10);
-
             const Layout = struct {
                 const rows = 6;
                 const cols = 4;
-                pub fn item(rect: Rectangle, row: u15, col: u15, comptime fmt: []const u8, args: anytype) void {
+                pub fn item(p: *DebugPanels, rect: Rectangle, row: u15, col: u15, comptime fmt: []const u8, args: anytype) void {
                     const subrect = Rectangle{
                         .x = rect.x + (col * rect.width / cols),
                         .y = rect.y + (row * rect.height / rows),
@@ -780,27 +854,53 @@ pub const DebugPanels = struct {
                     var buffer: [1024]u8 = undefined;
                     const str = std.fmt.bufPrint(&buffer, fmt, args) catch "";
                     ui.label(subrect, str, .{
-                        .id = .{ row, col, fmt },
+                        .id = .{ p, row, col, fmt },
+                        .font = font,
                     });
                 }
             };
 
-            Layout.item(content_rect, 0, 0, "   x = {d:.0}", .{camera.pos.x});
-            Layout.item(content_rect, 1, 0, "   y = {d:.0}", .{camera.pos.y});
-            Layout.item(content_rect, 2, 0, "   z = {d:.0}", .{camera.pos.z});
-            Layout.item(content_rect, 3, 0, " pan = {d:.0}", .{camera.rot.pan});
-            Layout.item(content_rect, 4, 0, "tilt = {d:.0}", .{camera.rot.tilt});
-            Layout.item(content_rect, 5, 0, "roll = {d:.0}", .{camera.rot.roll});
+            const panel_rect = Rectangle{
+                .x = 10,
+                .y = 10,
+                .width = 300,
+                .height = 20 + Layout.rows * font.getLineHeight(),
+            };
 
-            Layout.item(content_rect, 0, 1, "ents = {d}", .{level.entity_list.len});
+            ui.panel(panel_rect, .{});
+
+            const content_rect = panel_rect.shrink(10);
+
+            Layout.item(pan, content_rect, 0, 0, "    x = {d:.0}", .{camera.pos.x});
+            Layout.item(pan, content_rect, 1, 0, "    y = {d:.0}", .{camera.pos.y});
+            Layout.item(pan, content_rect, 2, 0, "    z = {d:.0}", .{camera.pos.z});
+            Layout.item(pan, content_rect, 3, 0, "  pan = {d:.0}", .{camera.rot.pan});
+            Layout.item(pan, content_rect, 4, 0, " tilt = {d:.0}", .{camera.rot.tilt});
+            Layout.item(pan, content_rect, 5, 0, " roll = {d:.0}", .{camera.rot.roll});
+
+            Layout.item(pan, content_rect, 0, 1, " ents = {d}", .{level.entity_list.len});
+            Layout.item(pan, content_rect, 1, 1, "  vis = {d}", .{level.entities(.{ .filter = Entity.isVisible }).count()});
+            Layout.item(pan, content_rect, 2, 1, "light = {d}", .{level.entities(.{ .filter = Entity.isLight }).count()});
+            Layout.item(pan, content_rect, 3, 1, "behav = {d}", .{level.entities(.{ .filter = Entity.hasAnyBehaviour }).count()});
+            Layout.item(pan, content_rect, 4, 1, "paths = {d}", .{Path.all_paths.len});
+            Layout.item(pan, content_rect, 5, 1, "regio = {d}", .{0}); // TODO: Set region counter here
         }
 
         if (pan.controls_visible) {
+            const Prop = struct { key: *bool, tag: []const u8 };
+            const props = [_]Prop{
+                .{ .key = &pan.show_entities, .tag = "Show Entities" },
+                .{ .key = &pan.show_lights, .tag = "Show Lights" },
+                .{ .key = &pan.show_regions, .tag = "Show Regions" },
+                .{ .key = &pan.show_paths, .tag = "Show Paths" },
+                .{ .key = &pan.show_behaviours, .tag = "Show Behaviours" },
+            };
+
             const panel_rect = Rectangle{
                 .x = core().screen_size.width - 210,
                 .y = 10,
                 .width = 200,
-                .height = 160,
+                .height = 20 + 20 * props.len + 5 * (props.len - 1),
             };
 
             ui.panel(panel_rect, .{});
@@ -809,36 +909,13 @@ pub const DebugPanels = struct {
 
             var stack = zg.UserInterface.VerticalStackLayout.init(content_rect);
 
-            {
+            for (props) |prop| {
                 const item = stack.get(20);
-                if (ui.checkBox(boxField(item), pan.show_entities, .{}))
-                    pan.show_entities = !pan.show_entities;
+                if (ui.checkBox(boxField(item), prop.key.*, .{ .id = .{ pan, prop.key } }))
+                    prop.key.* = !prop.key.*;
 
-                ui.label(textField(item), "Show Entities", .{});
-            }
-            stack.advance(10);
-            {
-                const item = stack.get(20);
-                if (ui.checkBox(boxField(item), pan.show_lights, .{}))
-                    pan.show_lights = !pan.show_lights;
-
-                ui.label(textField(item), "Show Lights", .{});
-            }
-            stack.advance(10);
-            {
-                const item = stack.get(20);
-                if (ui.checkBox(boxField(item), pan.show_regions, .{}))
-                    pan.show_regions = !pan.show_regions;
-
-                ui.label(textField(item), "Show Regions", .{});
-            }
-            stack.advance(10);
-            {
-                const item = stack.get(20);
-                if (ui.checkBox(boxField(item), pan.show_paths, .{}))
-                    pan.show_paths = !pan.show_paths;
-
-                ui.label(textField(item), "Show Paths", .{});
+                ui.label(textField(item), prop.tag, .{ .id = .{ pan, prop.key } });
+                stack.advance(5);
             }
         }
     }
@@ -913,9 +990,46 @@ pub const DefaultCamera = struct {
 };
 
 pub const draw = struct {
+    pub var default_font: *const zg.Renderer2D.Font = undefined;
+
     pub fn line3D(from: Vector3, to: Vector3, color: Color) void {
         __implementation.debug3d.drawLine(@bitCast([3]f32, from), @bitCast([3]f32, to), color) catch oom();
     }
+
+    fn cross3D(center: Vector3, size: f32, color: Color) void {
+        draw.line3D(center.sub(vector(size, 0, 0)), center.add(vector(size, 0, 0)), color);
+        draw.line3D(center.sub(vector(0, size, 0)), center.add(vector(0, size, 0)), color);
+        draw.line3D(center.sub(vector(0, 0, size)), center.add(vector(0, 0, size)), color);
+    }
+
+    fn circle3D(center: Vector3, normal: Vector3, radius: f32, color: Color) void {
+        const candidate_a = Vector3.cross(normal, Vector3.unitX);
+        const tangent = if (candidate_a.length2() < 0.1 or @fabs(Vector3.dot(candidate_a, normal)) > 0.9) // basically linear
+            Vector3.cross(normal, Vector3.unitZ).normalize()
+        else
+            candidate_a.normalize();
+
+        const cotangent = Vector3.cross(tangent, normal).normalize();
+
+        var prev: Vector3 = center.add(tangent.scale(radius));
+
+        var i: usize = 10;
+        while (i <= 360) : (i += 10) {
+            const a = std.math.pi * @intToFloat(f32, i) / 180.0;
+            var current = center.add(tangent.scale(radius * @cos(a))).add(cotangent.scale(radius * @sin(a)));
+            defer prev = current;
+
+            draw.line3D(prev, current, color);
+        }
+    }
+
+    fn position3D(pos: Vector3, size: f32, color: Color) void {
+        circle3D(pos, Vector3.unitX, size, color);
+        circle3D(pos, Vector3.unitY, size, color);
+        circle3D(pos, Vector3.unitZ, size, color);
+        cross3D(pos, size, color);
+    }
+
     pub fn line(from: Point, to: Point, color: Color) void {
         __implementation.r2d.drawLine(from.x, from.y, to.x, to.y, color) catch oom();
     }
@@ -982,7 +1096,11 @@ pub const __implementation = struct {
         r3d = try core().resources.createRenderer3D();
         debug3d = try core().resources.createDebugRenderer3D();
 
+        draw.default_font = try r2d.createFont(@embedFile("assets/fonts/retron2000.ttf"), 16);
+        DebugPanels.font = try r2d.createFont(@embedFile("assets/fonts/vera-mono.ttf"), 10);
+
         interface = try zg.UserInterface.init(mem.backing, &r2d);
+        interface.default_font = draw.default_font;
 
         mem.backing = core().allocator;
         level.arena = std.heap.ArenaAllocator.init(mem.backing);
@@ -1984,7 +2102,14 @@ fn panic(val: anytype) noreturn {
 //     };
 // }
 
-const BehaviourID = enum(usize) { _ };
+const BehaviourID = enum(usize) {
+    _,
+
+    pub fn typeName(id: BehaviourID) [:0]const u8 {
+        const ptr = @intToPtr([*:0]const u8, @enumToInt(id));
+        return std.mem.sliceTo(ptr, 0);
+    }
+};
 
 fn BehaviourSystem(comptime memory_module: type, comptime Context: type) type {
     return struct {
@@ -2087,7 +2212,9 @@ fn BehaviourSystem(comptime memory_module: type, comptime Context: type) type {
 
         fn BehaviourStorage(comptime Behaviour: type) type {
             return struct {
-                var storage_id_buffer: u8 = 0;
+                const type_name = @typeName(Behaviour);
+
+                var storage_id_buffer: [type_name.len:0]u8 = type_name.*;
 
                 pub inline fn id() BehaviourID {
                     return @intToEnum(BehaviourID, @ptrToInt(&storage_id_buffer));

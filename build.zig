@@ -20,7 +20,7 @@ pub fn build(b: *std.build.Builder) void {
     app.addPackage(zpm.pkgs.libgamestudio);
     app.addPackage(std.build.Pkg{
         .name = "@GAME@",
-        .source = .{ .path = "demo/3rd-person.zig" },
+        .source = .{ .path = "demo/future.zig" },
         .dependencies = &.{std.build.Pkg{
             .name = "basegame",
             .source = .{ .path = "src/package.zig" },

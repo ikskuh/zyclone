@@ -1,0 +1,10 @@
+
+fonts/retro-gaming.ttf:
+fonts/retron2000.ttf:
+	Daymarius (morderdrakonovich@gmail.com)
+	https://www.dafont.com/de/profile.php?user=1002696
+	https://www.dafont.com/de/retro-gaming.font
+
+fonts/vera-mono.ttf:
+	The Gnome Project
+	http://www.gnome.org/
