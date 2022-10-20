@@ -6,7 +6,7 @@ pub fn main() !void {
     eng.DefaultCamera.vel_high = 256.0;
 
     eng.level.load("levels/future/future.wmb");
-    // eng.level.load("levels/import-test/root.wmb");
+    // eng.level.load("levels/import-test/flagtest.wmb");
 
     _ = eng.attach(eng.DefaultCamera);
     _ = eng.attach(eng.DebugPanels);

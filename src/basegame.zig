@@ -293,10 +293,10 @@ pub const level = struct {
                         ent.rot = Angle{ .pan = def.angle.pan, .tilt = def.angle.tilt, .roll = def.angle.roll };
                         ent.scale = wmb2vec(def.scale);
                         ent.skills = def.skills;
-                        // ent.flags = .{
-                        //     .visible = !def.flags.invisible,
-                        //     .passable = def.flags.passable,
-                        // };
+                        ent.flags = .{
+                            .visible = !def.flags.invisible,
+                            .passable = def.flags.passable,
+                        };
 
                         // Load terrain lightmap if possible
                         {
@@ -625,6 +625,36 @@ pub const View = struct {
     zfar: f32 = 10_000.0,
 
     viewport: zg.Rectangle = zg.Rectangle{ .x = 0, .y = 0, .width = 0, .height = 0 },
+
+    pub fn getViewport(view: View) Rectangle {
+        return if (view.viewport.area() == 0)
+            Rectangle.init(Point.zero, core().screen_size)
+        else
+            view.viewport;
+    }
+
+    pub fn getViewProjectionMatrix(view: View) Matrix4 {
+        const projection_matrix = view.getProjectionMatrix();
+        const view_matrix = view.getViewMatrix();
+        return zlm.Mat4.batchMul(&.{ view_matrix, projection_matrix });
+    }
+
+    pub fn getViewMatrix(view: View) Matrix4 {
+        const camera_fwd = vec.rotate(vector(0, 0, -1), view.rot);
+        const camera_up = vec.rotate(vector(0, 1, 0), view.rot);
+        return zlm.Mat4.createLook(view.pos, camera_fwd, camera_up);
+    }
+
+    pub fn getProjectionMatrix(view: View) Matrix4 {
+        const vp = view.getViewport();
+        const aspect = @intToFloat(f32, vp.width) / @intToFloat(f32, vp.height);
+        return zlm.Mat4.createPerspective(
+            zlm.toRadians(view.arc),
+            aspect,
+            view.znear,
+            view.zfar,
+        );
+    }
 };
 
 pub var camera: View = .{};
@@ -732,6 +762,31 @@ pub const vec = struct {
             -@cos(pan) * @cos(tilt),
         );
     }
+
+    pub fn toScreen(v: Vector3, view: ?*View) ?Vector3 {
+        const actual_view = (view orelse &camera);
+        const trafo = actual_view.getViewProjectionMatrix();
+
+        const affine_world = v.toAffinePosition();
+        const affine_screen = affine_world.transform(trafo);
+
+        if (affine_screen.z < 0)
+            return null;
+
+        const raw_pos = Vector3.fromAffinePosition(affine_screen);
+
+        // safety margin for vectors off the screen
+        if (@fabs(raw_pos.x) >= 10 or @fabs(raw_pos.y) >= 10)
+            return null;
+
+        const actual_viewport = actual_view.getViewport();
+
+        return Vector3{
+            .x = @intToFloat(f32, actual_viewport.x) + (0.5 + 0.5 * raw_pos.x) * @intToFloat(f32, actual_viewport.width - 1),
+            .y = @intToFloat(f32, actual_viewport.y) + (0.5 - 0.5 * raw_pos.y) * @intToFloat(f32, actual_viewport.height - 1),
+            .z = raw_pos.z,
+        };
+    }
 };
 
 pub const screen = struct {
@@ -830,6 +885,48 @@ pub const DebugPanels = struct {
                 const rel_pos = @mod(time.total, 10.0); // sweep each path in X seconds
 
                 draw.position3D(path.lerp(rel_pos / 10.0), 5.0, Color.white);
+            }
+        }
+        if (pan.show_behaviours) {
+            const common_prefix = if (@hasDecl(game, "actions"))
+                @typeName(game.actions) ++ "."
+            else
+                "";
+
+            var it = level.entities(.{ .filter = Entity.hasAnyBehaviour });
+            while (it.next()) |ent| {
+                const pos2d = vec.toScreen(ent.pos, null) orelse continue;
+
+                const center = Point{
+                    .x = @floatToInt(i16, pos2d.x),
+                    .y = @floatToInt(i16, pos2d.y),
+                };
+
+                draw.line(
+                    Point{ .x = center.x, .y = center.y },
+                    Point{ .x = center.x + 15, .y = center.y },
+                    Color.red,
+                );
+                draw.line(
+                    Point{ .x = center.x, .y = center.y },
+                    Point{ .x = center.x, .y = center.y + 15 },
+                    Color.red,
+                );
+
+                var cursor = Point{ .x = center.x + 2, .y = center.y };
+                var bit = ent.behaviours.list.first;
+                while (bit) |node| : (bit = node.next) {
+                    defer cursor.y += draw.default_font.getLineHeight();
+
+                    const raw_name = node.data.id.typeName();
+
+                    const name = if (std.mem.startsWith(u8, raw_name, common_prefix))
+                        raw_name[common_prefix.len..]
+                    else
+                        raw_name;
+
+                    draw.text(cursor, name, Color.red);
+                }
             }
         }
 
@@ -1032,6 +1129,16 @@ pub const draw = struct {
 
     pub fn line(from: Point, to: Point, color: Color) void {
         __implementation.r2d.drawLine(from.x, from.y, to.x, to.y, color) catch oom();
+    }
+
+    pub fn text(point: Point, string: []const u8, color: Color) void {
+        __implementation.r2d.drawString(
+            default_font,
+            string,
+            point.x,
+            point.y,
+            color,
+        ) catch oom();
     }
 };
 
@@ -1272,31 +1379,13 @@ pub const __implementation = struct {
         gl.clearDepthf(1.0);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        const ss = core().screen_size;
-
-        const aspect = @intToFloat(f32, ss.width) / @intToFloat(f32, ss.height);
-
-        const camera_fwd = vec.rotate(vector(0, 0, -1), camera.rot);
-        const camera_up = vec.rotate(vector(0, 1, 0), camera.rot);
-
-        const projection_matrix = zlm.Mat4.createPerspective(
-            zlm.toRadians(camera.arc),
-            aspect,
-            camera.znear,
-            camera.zfar,
-        );
-        const view_matrix = zlm.Mat4.createLook(camera.pos, camera_fwd, camera_up);
-
-        const camera_view_proj = zlm.Mat4.batchMul(&.{
-            view_matrix,
-            projection_matrix,
-        });
+        const camera_view_proj = camera.getViewProjectionMatrix();
 
         r3d.render(camera_view_proj.fields);
 
         debug3d.render(camera_view_proj.fields);
 
-        r2d.render(ss);
+        r2d.render(core().screen_size);
     }
 
     pub fn deinit(_: *Application) void {
