@@ -38,37 +38,41 @@ pub fn main() !void {
 /// these actions in entities loaded from a level.
 /// Every pub structure in here can be loaded.
 pub const actions = struct {
+    /// Appears to be some kind of blinking light action
     pub const FXA_LightBlink = struct {
+        pub fn init(ent: *eng.Entity, _: *@This()) void {
+            ent.flags.visible = false;
+        }
         pub fn update(ent: *eng.Entity, _: *@This()) void {
-            if (eng.key.held(.@"1")) {
-                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
-            }
+            _ = ent;
         }
     };
 
+    /// The spawn point, attached to the sprite.
     pub const a = struct {
+        pub fn init(ent: *eng.Entity, _: *@This()) void {
+            _ = ent;
+        }
         pub fn update(ent: *eng.Entity, _: *@This()) void {
-            if (eng.key.held(.@"2")) {
-                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
-            }
+            _ = ent;
+        }
+    };
+
+    /// The "ga"te to the crystal in the teleporter room.
+    /// Attached directly to the sprite.
+    pub const ga = struct {
+        pub fn update(ent: *eng.Entity, _: *@This()) void {
+            _ = ent;
         }
     };
 
     /// - The trigger that opens the door to the final room
-    /// - The sprite before the locked room
-    pub const ga = struct {
-        pub fn update(ent: *eng.Entity, _: *@This()) void {
-            if (eng.key.held(.@"3")) {
-                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
-            }
-        }
-    };
-
     pub const @".wmb" = struct {
+        pub fn init(ent: *eng.Entity, _: *@This()) void {
+            ent.flags.visible = false;
+        }
         pub fn update(ent: *eng.Entity, _: *@This()) void {
-            if (eng.key.held(.@"3")) {
-                ent.scale = ent.scale.add(eng.Vector3.all(0.1 * eng.time.step));
-            }
+            _ = ent;
         }
     };
 
