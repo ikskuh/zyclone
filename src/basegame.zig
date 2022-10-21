@@ -571,7 +571,24 @@ pub const Entity = struct {
 
     // physics
 
-    pub fn setPhysicsType(ent: *Entity) void {
+    pub const Shape = union(enum) {
+        sphere,
+        box,
+        cylinder,
+        capsule,
+        convex,
+        polygon,
+        // heightfield
+    };
+
+    pub const PhysicsMode = union(enum) {
+        disabled,
+        static,
+        rigid,
+        kinematic,
+    };
+
+    pub fn setPhysicsType(ent: *Entity, mode: PhysicsMode, shape: Shape) void {
         if (ent.body) |body| {
             ode.dBodyDestroy(body);
         }
@@ -1336,7 +1353,12 @@ pub const ui = struct {
 pub const Body = ode.dBodyID;
 pub const Collider = ode.dGeomID;
 
+/// Physics engine component
 pub const physics = struct {
+    /// The native API for the physics engine. Exposes
+    /// ODE directly.
+    pub const engine = ode;
+
     var world: ode.dWorldID = undefined;
     var space: ode.dSpaceID = undefined;
     var contactgroup: ode.dJointGroupID = undefined;

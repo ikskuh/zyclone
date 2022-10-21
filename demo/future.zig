@@ -39,7 +39,7 @@ pub fn main() !void {
 
     const ball = eng.Entity.create("3ball.mdl", eng.vector(0, 3, 0), Kicker);
     ball.scale = eng.Vector3.all(1.0 / 16.0);
-    ball.setPhysicsType();
+    ball.setPhysicsType(.rigid, .sphere);
 
     // return error.Poop;
 }
