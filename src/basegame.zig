@@ -308,6 +308,7 @@ pub const level = struct {
 
             const map_ent = Entity.create(null, nullvector, null);
             map_ent.geometry = .{ .blocks = block_geometry };
+            map_ent.setPhysicsType(.static, .polygon);
 
             for (level_data.objects) |object, oid| {
                 switch (object) {
@@ -485,7 +486,12 @@ pub const Entity = struct {
     light: ?Light = null,
 
     // physics:
+
+    /// The rigid or kinematic body for physics actors
     body: ?Body = null,
+
+    /// the collder of the entity. is non-null for static, kinematic or rigid physics actors.
+    collider: ?Collider = null,
 
     // private:
     behaviours: Behaviours = .{},
@@ -592,25 +598,81 @@ pub const Entity = struct {
         if (ent.body) |body| {
             ode.dBodyDestroy(body);
         }
+        if (ent.collider) |geom| {
+            ode.dGeomDestroy(geom);
+        }
+        ent.collider = null;
+        ent.body = null;
 
-        var real_bb = BoundingBox{
+        if (mode == .disabled) {
+            // we just deleted the shape and body, we're done.
+            return;
+        }
+
+        const scaled_bb = BoundingBox{
             .min = ent.bounds.min.mul(ent.scale),
             .max = ent.bounds.max.mul(ent.scale),
         };
-        const extends = real_bb.extends();
-        const radius = std.math.max3(extends.x, extends.y, extends.z) / 2.0;
-
-        const body = ode.dBodyCreate(physics.world);
-        const geom = ode.dCreateSphere(physics.space, radius);
+        const extends = scaled_bb.extends();
 
         var m: ode.dMass = undefined;
-        ode.dMassSetSphere(&m, 0.1, radius);
-        ode.dBodySetMass(body, &m);
+        ent.collider = switch (shape) {
+            .sphere => blk: {
+                const radius = std.math.max3(extends.x, extends.y, extends.z) / 2.0;
 
-        ode.dGeomSetBody(geom, body);
-        ode.dBodySetPosition(body, ent.pos.x, ent.pos.y, ent.pos.z);
+                ode.dMassSetSphereTotal(&m, 100.0, radius);
 
-        ent.body = body;
+                break :blk ode.dCreateSphere(physics.space, radius);
+            },
+            .box => blk: {
+                if (true) @panic("box not supported yet");
+                break :blk undefined;
+            },
+            .cylinder => blk: {
+                if (true) @panic("cylinder not supported yet");
+                break :blk undefined;
+            },
+            .capsule => blk: {
+                if (true) @panic("capsule not supported yet");
+                break :blk undefined;
+            },
+            .convex => blk: {
+                if (true) @panic("convex not supported yet");
+                break :blk undefined;
+            },
+            .polygon => blk: {
+                const trimesh = switch (ent.geometry.?) {
+                    .model => |data| { // *zg.ResourceManager.Geometry,
+                        _ = data;
+                        @panic("trimesh not supported for model yet.");
+                    },
+                    .sprite => |data| { // Sprite,
+                        _ = data;
+                        @panic("trimesh not supported for sprite yet.");
+                    },
+                    .blocks => |data| data.trimesh,
+                    .terrain => |data| { // Terrain,
+                        _ = data;
+                        @panic("trimesh not supported for terrain yet.");
+                    },
+                };
+
+                break :blk ode.dCreateTriMesh(physics.space, trimesh, null, null, null);
+            },
+        };
+
+        if (mode == .kinematic or mode == .rigid) {
+            const body = ode.dBodyCreate(physics.world);
+            ode.dGeomSetBody(ent.collider.?, body);
+            ode.dBodySetPosition(body, ent.pos.x, ent.pos.y, ent.pos.z);
+            ode.dBodySetMass(body, &m);
+            ode.dBodySetDampingDefaults(body);
+
+            if (mode == .kinematic)
+                ode.dBodySetKinematic(body);
+
+            ent.body = body;
+        }
     }
 
     pub fn addForceCentral(ent: *Entity, force: Vector3) void {
@@ -733,6 +795,8 @@ pub const Terrain = struct {
 };
 
 pub const BlockGeometry = struct {
+    trimesh: ode.dTriMeshDataID,
+
     level: gamestudio.wmb.Level,
     geometries: []*zg.ResourceManager.Geometry,
 
@@ -745,17 +809,55 @@ pub const BlockGeometry = struct {
         var geoms = allocator.alloc(*zg.ResourceManager.Geometry, lvl.blocks.len) catch oom();
         errdefer allocator.free(geoms);
 
+        var vertices = std.ArrayList(Vector3).init(mem.backing);
+        var indices = std.ArrayList(u16).init(mem.backing);
+
         for (lvl.blocks) |src_block, i| {
             geoms[i] = core().resources.createGeometry(WmbGeometryLoader{
                 .level = lvl,
                 .block = src_block,
                 .textures = &texture_cache,
             }) catch |err| panic(err);
+
+            for (src_block.triangles) |tri| {
+                const verts = [3]Vector3{
+                    vec.make(src_block.vertices[tri.indices[0]].position),
+                    vec.make(src_block.vertices[tri.indices[1]].position),
+                    vec.make(src_block.vertices[tri.indices[2]].position),
+                };
+
+                for (verts) |vert| {
+                    const index = for (vertices.items) |v, j| {
+                        if (v.sub(vert).length2() < 0.1) // 0.01 precision
+                            break j;
+                    } else vertices.items.len;
+
+                    if (index == vertices.items.len) {
+                        vertices.append(vert) catch @panic("oom");
+                    }
+
+                    indices.append(@intCast(u16, index)) catch @panic("oom");
+                }
+            }
         }
+
+        var mesh = ode.dGeomTriMeshDataCreate() orelse @panic("failed to create trimesh");
+        errdefer ode.dGeomTriMeshDataDestroy(mesh);
+
+        ode.dGeomTriMeshDataBuildSingle(
+            mesh,
+            vertices.items.ptr,
+            @sizeOf(Vector3),
+            @intCast(c_int, vertices.items.len),
+            indices.items.ptr,
+            @intCast(c_int, indices.items.len),
+            3 * @sizeOf(u16),
+        );
 
         return BlockGeometry{
             .level = lvl,
             .geometries = geoms,
+            .trimesh = mesh,
         };
     }
 };
@@ -1056,16 +1158,38 @@ pub const DebugPanels = struct {
         }
 
         if (pan.states_visible) {
+            const column_sizes = [_]u15{ 100, 85, 90 };
+            // const total_size = comptime blk: {
+            //     var sum = 0.0;
+            //     for (column_sizes) |t| {
+            //         sum += t;
+            //     }
+            //     break :blk sum;
+            // };
+
             const Layout = struct {
                 const rows = 6;
-                const cols = 4;
-                pub fn item(p: *DebugPanels, rect: Rectangle, row: u15, col: u15, comptime fmt: []const u8, args: anytype) void {
-                    const subrect = Rectangle{
-                        .x = rect.x + (col * rect.width / cols),
-                        .y = rect.y + (row * rect.height / rows),
-                        .width = rect.width / cols,
-                        .height = rect.height / rows,
+                const cols = column_sizes.len;
+                const row_height = 12;
+
+                pub fn column(col: u15) Rectangle {
+                    var subrect = Rectangle{
+                        .x = 10,
+                        .y = 10,
+                        .width = column_sizes[col] + 20,
+                        .height = row_height * rows + 20,
                     };
+                    for (column_sizes[0..col]) |size| {
+                        subrect.x += size;
+                    }
+                    return subrect;
+                }
+
+                pub fn item(p: *DebugPanels, row: u15, col: u15, comptime fmt: []const u8, args: anytype) void {
+                    var subrect = column(col).shrink(10);
+                    subrect.y += (row * row_height);
+                    subrect.height = row_height;
+
                     var buffer: [1024]u8 = undefined;
                     const str = std.fmt.bufPrint(&buffer, fmt, args) catch "";
                     ui.label(subrect, str, .{
@@ -1075,30 +1199,30 @@ pub const DebugPanels = struct {
                 }
             };
 
-            const panel_rect = Rectangle{
-                .x = 10,
-                .y = 10,
-                .width = 300,
-                .height = 20 + Layout.rows * font.getLineHeight(),
-            };
+            for (column_sizes) |_, i| {
+                ui.panel(Layout.column(@intCast(u15, i)), .{ .id = i });
+            }
 
-            ui.panel(panel_rect, .{});
+            Layout.item(pan, 0, 0, "    x ={d: >7.1}", .{camera.pos.x});
+            Layout.item(pan, 1, 0, "    y ={d: >7.1}", .{camera.pos.y});
+            Layout.item(pan, 2, 0, "    z ={d: >7.1}", .{camera.pos.z});
+            Layout.item(pan, 3, 0, "  pan ={d: >7.1}", .{camera.rot.pan});
+            Layout.item(pan, 4, 0, " tilt ={d: >7.1}", .{camera.rot.tilt});
+            Layout.item(pan, 5, 0, " roll ={d: >7.1}", .{camera.rot.roll});
 
-            const content_rect = panel_rect.shrink(10);
+            Layout.item(pan, 0, 1, " ents = {d: >4}", .{level.entity_list.len});
+            Layout.item(pan, 1, 1, "  vis = {d: >4}", .{level.entities(.{ .filter = Entity.isVisible }).count()});
+            Layout.item(pan, 2, 1, "light = {d: >4}", .{level.entities(.{ .filter = Entity.isLight }).count()});
+            Layout.item(pan, 3, 1, "behav = {d: >4}", .{level.entities(.{ .filter = Entity.hasAnyBehaviour }).count()});
+            Layout.item(pan, 4, 1, "paths = {d: >4}", .{Path.all.len});
+            Layout.item(pan, 5, 1, "regio = {d: >4}", .{Region.all.len});
 
-            Layout.item(pan, content_rect, 0, 0, "    x = {d:.0}", .{camera.pos.x});
-            Layout.item(pan, content_rect, 1, 0, "    y = {d:.0}", .{camera.pos.y});
-            Layout.item(pan, content_rect, 2, 0, "    z = {d:.0}", .{camera.pos.z});
-            Layout.item(pan, content_rect, 3, 0, "  pan = {d:.0}", .{camera.rot.pan});
-            Layout.item(pan, content_rect, 4, 0, " tilt = {d:.0}", .{camera.rot.tilt});
-            Layout.item(pan, content_rect, 5, 0, " roll = {d:.0}", .{camera.rot.roll});
-
-            Layout.item(pan, content_rect, 0, 1, " ents = {d}", .{level.entity_list.len});
-            Layout.item(pan, content_rect, 1, 1, "  vis = {d}", .{level.entities(.{ .filter = Entity.isVisible }).count()});
-            Layout.item(pan, content_rect, 2, 1, "light = {d}", .{level.entities(.{ .filter = Entity.isLight }).count()});
-            Layout.item(pan, content_rect, 3, 1, "behav = {d}", .{level.entities(.{ .filter = Entity.hasAnyBehaviour }).count()});
-            Layout.item(pan, content_rect, 4, 1, "paths = {d}", .{Path.all.len});
-            Layout.item(pan, content_rect, 5, 1, "regio = {d}", .{Region.all.len});
+            Layout.item(pan, 0, 2, "frame ={d: >6.2} ms", .{@intToFloat(f32, stats.total_us) / std.time.us_per_ms});
+            Layout.item(pan, 1, 2, "logic ={d: >6.2} ms", .{@intToFloat(f32, stats.logic_us) / std.time.us_per_ms});
+            Layout.item(pan, 2, 2, " phys ={d: >6.2} ms", .{@intToFloat(f32, stats.physics_us) / std.time.us_per_ms});
+            Layout.item(pan, 3, 2, " updt ={d: >6.2} ms", .{@intToFloat(f32, stats.update_us) / std.time.us_per_ms});
+            Layout.item(pan, 4, 2, " draw ={d: >6.2} ms", .{@intToFloat(f32, stats.render_us) / std.time.us_per_ms});
+            Layout.item(pan, 5, 2, "   gl ={d: >6.2} ms", .{@intToFloat(f32, stats.gl_us) / std.time.us_per_ms});
         }
 
         if (pan.controls_visible) {
@@ -1109,6 +1233,7 @@ pub const DebugPanels = struct {
                 .{ .key = &pan.show_regions, .tag = "Show Regions" },
                 .{ .key = &pan.show_paths, .tag = "Show Paths" },
                 .{ .key = &pan.show_behaviours, .tag = "Show Behaviours" },
+                .{ .key = &physics.draw_contacts, .tag = "Draw Contacts" },
             };
 
             const panel_rect = Rectangle{
@@ -1359,6 +1484,8 @@ pub const physics = struct {
     /// ODE directly.
     pub const engine = ode;
 
+    pub var draw_contacts: bool = false;
+
     var world: ode.dWorldID = undefined;
     var space: ode.dSpaceID = undefined;
     var contactgroup: ode.dJointGroupID = undefined;
@@ -1378,25 +1505,53 @@ pub const physics = struct {
 
         const b1: ode.dBodyID = ode.dGeomGetBody(o1);
         const b2: ode.dBodyID = ode.dGeomGetBody(o2);
-        var contact: ode.dContact = undefined;
-        contact.surface.mode = ode.dContactBounce | ode.dContactSoftCFM;
-        // friction parameter
-        contact.surface.mu = ode.dInfinity;
-        contact.surface.rho = 10.0;
-        // bounce is the amount of "bouncyness".
-        contact.surface.bounce = 0.9;
-        // bounce_vel is the minimum incoming velocity to cause a bounce
-        contact.surface.bounce_vel = 0.1;
-        // constraint force mixing parameter
-        contact.surface.soft_cfm = 0.001;
 
-        const numc = ode.dCollide(o1, o2, 1, &contact.geom, @sizeOf(ode.dContact));
-        if (numc != 0) {
-            contacts.append(Contact{
-                .position = vec.make(contact.geom.pos),
-                .normal = vec.make(contact.geom.normal),
-                .creation_time = time.total,
-            }) catch oom();
+        const surface = ode.dSurfaceParameters{
+            .mode = ode.dContactBounce | ode.dContactSoftCFM,
+
+            // friction parameter
+            .mu = 10000.0, // ode.dInfinity,
+            .mu2 = 0,
+            // Rolling friction
+            .rho = 10.0,
+            .rho2 = 0,
+            // Spinning friction
+            .rhoN = 0,
+
+            .bounce = 0.9, // Coefficient of restitution
+            .bounce_vel = 0.1, // Bouncing threshold
+
+            // constraint force mixing parameter
+            .soft_erp = 0,
+            .soft_cfm = 0.001,
+            .motion1 = 0,
+            .motion2 = 0,
+            .motionN = 0,
+            .slip1 = 0,
+            .slip2 = 0,
+        };
+
+        var collisions: [32]ode.dContactGeom = undefined;
+
+        const numc = ode.dCollide(o1, o2, collisions.len, &collisions, @sizeOf(ode.dContactGeom));
+        if (numc < 0) {
+            std.log.err("Failed to perform dCollide!", .{});
+            return;
+        }
+        for (collisions[0..@intCast(usize, numc)]) |contact_geom| {
+            var contact = ode.dContact{
+                .geom = contact_geom,
+                .surface = surface,
+                .fdir1 = undefined,
+            };
+
+            if (draw_contacts) {
+                contacts.append(Contact{
+                    .position = vec.make(contact.geom.pos),
+                    .normal = vec.make(contact.geom.normal),
+                    .creation_time = time.total,
+                }) catch oom();
+            }
 
             var c: ode.dJointID = ode.dJointCreateContact(world, contactgroup, &contact);
             ode.dJointAttach(c, b1, b2);
@@ -1410,18 +1565,19 @@ pub const physics = struct {
         ode.dInitODE();
         world = ode.dWorldCreate();
         space = ode.dHashSpaceCreate(null);
-        ode.dWorldSetGravity(world, 0, -9.81, 0.0);
+        ode.dWorldSetGravity(world, 0, 16 * -9.81, 0.0);
         ode.dWorldSetCFM(world, 1e-5);
         contactgroup = ode.dJointGroupCreate(0);
-
-        _ = ode.dCreatePlane(space, 0, 1, 0, -3);
     }
 
     var total_time: f32 = 0;
+    const physics_time_step = 0.01; // run with 100 Hz
 
     fn update() void {
-        const physics_time_step = 0.01; // run with 100 Hz
+        var measure = stats.measure(.physics);
+        defer measure.complete();
 
+        var ticks: usize = 0;
         while (total_time < time.total) : (total_time += physics_time_step) {
 
             // find collisions and add contact joints
@@ -1430,7 +1586,11 @@ pub const physics = struct {
             _ = ode.dWorldQuickStep(world, physics_time_step);
             // remove all contact joints
             ode.dJointGroupEmpty(contactgroup);
+
+            ticks += 1;
         }
+
+        // std.debug.print("ticks: {}\n", .{ticks});
 
         // copy back physics properties to entities
         {
@@ -1464,7 +1624,7 @@ pub const physics = struct {
                     _ = contacts.swapRemove(i);
                 } else {
                     i += 1;
-                    draw.circle3D(item.position, item.normal, lifetime, Color.gray(128));
+                    draw.circle3D(item.position, item.normal, lifetime, Color.red);
                 }
             }
         }
@@ -1476,6 +1636,37 @@ pub const physics = struct {
         ode.dSpaceDestroy(space);
         ode.dWorldDestroy(world);
         ode.dCloseODE();
+    }
+};
+
+pub const stats = struct {
+    var total_us: u64 = 0;
+
+    // fn update()
+    var update_us: u64 = 0; // total update() time
+    var physics_us: u64 = 0; // physics update time
+    var render_us: u64 = 0; // draw list building
+    var logic_us: u64 = 0; // user updates
+
+    // fn draw()
+    var gl_us: u64 = 0; // actual drawing
+
+    pub const Measure = struct {
+        target: *u64,
+        start: i128,
+
+        pub fn complete(self: *Measure) void {
+            const end = std.time.nanoTimestamp();
+            self.target.* = @intCast(u64, end - self.start) / std.time.ns_per_us;
+            self.* = undefined;
+        }
+    };
+
+    pub fn measure(comptime target: @TypeOf(.Enum)) Measure {
+        return Measure{
+            .start = std.time.nanoTimestamp(),
+            .target = &@field(stats, @tagName(target) ++ "_us"),
+        };
     }
 };
 
@@ -1525,6 +1716,11 @@ pub const __implementation = struct {
     }
 
     pub fn update(_: *Application) !bool {
+        stats.total_us = stats.update_us + stats.gl_us;
+
+        var update_measure = stats.measure(.update);
+        defer update_measure.complete();
+
         const timestamp = zg.milliTimestamp();
         defer last_frame_time = timestamp;
 
@@ -1590,6 +1786,9 @@ pub const __implementation = struct {
         debug3d.reset();
 
         {
+            var measure = stats.measure(.logic);
+            defer measure.complete();
+
             interface_builder = interface.construct(core().screen_size);
             defer interface_builder.?.finish();
 
@@ -1625,49 +1824,57 @@ pub const __implementation = struct {
             physics.update();
         }
 
-        // render all entities
         {
-            var it: level.EntityIterator = level.entities(.{ .filter = Entity.isVisible });
-            while (it.next()) |ent| {
-                if (ent.geometry) |render_object| {
-                    const trafo = ent.getWorldTransform();
+            var measure = stats.measure(.render);
+            defer measure.complete();
 
-                    switch (render_object) {
-                        .sprite => |sprite| {
-                            if (sprite.frames > 1) {
-                                const total_frames = @floatToInt(u64, 8 * time.total);
-                                const current_frame = @truncate(u15, total_frames % sprite.frames);
+            // render all entities
+            {
+                var it: level.EntityIterator = level.entities(.{ .filter = Entity.isVisible });
+                while (it.next()) |ent| {
+                    if (ent.geometry) |render_object| {
+                        const trafo = ent.getWorldTransform();
 
-                                var rect = zg.Rectangle{
-                                    .x = current_frame * sprite.width,
-                                    .y = 0,
-                                    .width = sprite.width,
-                                    .height = sprite.height,
-                                };
+                        switch (render_object) {
+                            .sprite => |sprite| {
+                                if (sprite.frames > 1) {
+                                    const total_frames = @floatToInt(u64, 8 * time.total);
+                                    const current_frame = @truncate(u15, total_frames % sprite.frames);
 
-                                try r3d.drawPartialSprite(sprite.texture, rect, trafo.fields);
-                            } else {
-                                try r3d.drawSprite(sprite.texture, trafo.fields);
-                            }
-                        },
-                        .model => |geometry| try r3d.drawGeometry(geometry, trafo.fields),
-                        .blocks => |blocks| {
-                            for (blocks.geometries) |geometry| {
-                                try r3d.drawGeometry(geometry, trafo.fields);
-                            }
-                        },
-                        .terrain => @panic("terrain not supported yet"),
+                                    var rect = zg.Rectangle{
+                                        .x = current_frame * sprite.width,
+                                        .y = 0,
+                                        .width = sprite.width,
+                                        .height = sprite.height,
+                                    };
+
+                                    try r3d.drawPartialSprite(sprite.texture, rect, trafo.fields);
+                                } else {
+                                    try r3d.drawSprite(sprite.texture, trafo.fields);
+                                }
+                            },
+                            .model => |geometry| try r3d.drawGeometry(geometry, trafo.fields),
+                            .blocks => |blocks| {
+                                for (blocks.geometries) |geometry| {
+                                    try r3d.drawGeometry(geometry, trafo.fields);
+                                }
+                            },
+                            .terrain => @panic("terrain not supported yet"),
+                        }
                     }
                 }
             }
-        }
 
-        try interface.render();
+            try interface.render();
+        }
 
         return (quit_now == false);
     }
 
     pub fn render(_: *Application) !void {
+        var measure = stats.measure(.gl);
+        defer measure.complete();
+
         const gl = zg.gles;
 
         gl.clearColor(

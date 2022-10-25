@@ -1,29 +1,28 @@
 const std = @import("std");
 const zpm = @import("zpm.zig");
 
-pub fn build(b: *std.build.Builder) void {
-    const use_android = b.option(bool, "android", "Enable the android SDK") orelse false;
+const ode_config = zpm.sdks.ode.Config{
+    .index_size = .u16,
+    .no_builtin_threading_impl = true,
+    .no_threading_intf = true,
+    .trimesh = .opcode,
+    .libccd = null,
+    .ou = false,
+    .precision = .single,
+};
 
-    const target = b.standardTargetOptions(.{});
-    const mode = b.standardReleaseOptions();
+const Options = struct {
+    android: bool,
+    web: bool,
+    target: std.zig.CrossTarget,
+    mode: std.builtin.Mode,
+};
 
-    const sdk = zpm.sdks.@"zero-graphics".init(b, use_android);
-
-    const ode = zpm.sdks.ode.init(b);
-    const ode_config = zpm.sdks.ode.Config{
-        .index_size = .u16,
-        .no_builtin_threading_impl = true,
-        .no_threading_intf = true,
-        .trimesh = .opcode,
-        .libccd = null,
-        .ou = false,
-        .precision = .single,
-    };
-
-    const app = sdk.createApplication("3rd_person", "src/entrypoint.zig");
-    app.setDisplayName("Acknex Clone");
-    app.setPackageName("net.random_projects.games.acknex_clone");
-    app.setBuildMode(mode);
+pub fn compileGame(zg: *zpm.sdks.@"zero-graphics", ode: *zpm.sdks.ode, file_name: []const u8, display_name: []const u8, source_file: []const u8, options: Options) void {
+    const app = zg.createApplication(file_name, "src/entrypoint.zig");
+    app.setDisplayName(display_name);
+    app.setPackageName(zg.builder.fmt("net.random_projects.games.{s}", .{file_name}));
+    app.setBuildMode(options.mode);
 
     // app.enable_code_editor = false;
 
@@ -32,39 +31,39 @@ pub fn build(b: *std.build.Builder) void {
     app.addPackage(ode.getPackage("ode", ode_config));
     app.addPackage(std.build.Pkg{
         .name = "@GAME@",
-        .source = .{ .path = "demo/future.zig" },
+        .source = .{ .path = source_file },
         .dependencies = &.{std.build.Pkg{
             .name = "basegame",
             .source = .{ .path = "src/package.zig" },
         }},
     });
 
-    const instance = app.compileFor(.{ .desktop = target });
+    const instance = app.compileFor(.{ .desktop = options.target });
     ode.linkTo(instance.data.desktop, .static, ode_config);
     instance.install();
 
-    if (use_android) {
+    if (options.android) {
         const android_app = app.compileFor(.android);
-
-        const android_step = b.step("app", "Builds the android app");
-
-        android_step.dependOn(android_app.getStep());
+        android_app.install();
     }
+}
 
-    const run_cmd = instance.run();
-    run_cmd.step.dependOn(b.getInstallStep());
-    run_cmd.cwd = "demo";
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+pub fn build(b: *std.build.Builder) void {
+    const use_android = b.option(bool, "android", "Enable the android SDK") orelse false;
 
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    const target = b.standardTargetOptions(.{});
+    const mode = b.standardReleaseOptions();
 
-    const exe_tests = b.addTest("src/main.zig");
-    exe_tests.setTarget(target);
-    exe_tests.setBuildMode(mode);
+    const sdk = zpm.sdks.@"zero-graphics".init(b, use_android);
+    const ode = zpm.sdks.ode.init(b);
 
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&exe_tests.step);
+    const opts = Options{
+        .android = use_android,
+        .web = false,
+        .target = target,
+        .mode = mode,
+    };
+
+    compileGame(sdk, ode, "future_demo", "Zyclone Future Demo", "demo/future/future.zig", opts);
+    compileGame(sdk, ode, "playground", "Zyclone Developer Playground", "demo/playground.zig", opts);
 }
