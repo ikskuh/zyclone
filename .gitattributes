@@ -1,2 +1,2 @@
 *.zig text=auto eol=lf
-*.zig text=auto eol=lf
+src/assets/soundfonts filter=lfs diff=lfs merge=lfs -text

@@ -10,3 +10,12 @@
 [submodule "vendor/ode"]
 	path = vendor/ode
 	url = https://github.com/MasterQ32/zig-ode
+[submodule "vendor/soundio"]
+	path = vendor/soundio
+	url = https://github.com/andrewrk/libsoundio
+[submodule "vendor/maps"]
+	path = vendor/maps
+	url = https://github.com/MasterQ32/maps
+[submodule "vendor/ziggysynth"]
+	path = vendor/ziggysynth
+	url = https://github.com/sinshu/ziggysynth

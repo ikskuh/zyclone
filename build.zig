@@ -18,32 +18,56 @@ const Options = struct {
     mode: std.builtin.Mode,
 };
 
-pub fn compileGame(zg: *zpm.sdks.@"zero-graphics", ode: *zpm.sdks.ode, file_name: []const u8, display_name: []const u8, source_file: []const u8, options: Options) void {
+pub fn compileGame(
+    zg: *zpm.sdks.@"zero-graphics",
+    ode: *zpm.sdks.ode,
+    soundio: *zpm.sdks.soundio,
+    file_name: []const u8,
+    display_name: []const u8,
+    source_file: []const u8,
+    options: Options,
+) void {
     const app = zg.createApplication(file_name, "src/entrypoint.zig");
     app.setDisplayName(display_name);
     app.setPackageName(zg.builder.fmt("net.random_projects.games.{s}", .{file_name}));
     app.setBuildMode(options.mode);
+    app.setIcon("design/zyclone-icon.png");
+
+    app.android_targets.arm = false;
+    app.android_targets.x86 = false;
 
     // app.enable_code_editor = false;
 
+    app.addPackage(zpm.pkgs.ziggysynth);
     app.addPackage(zpm.pkgs.zlm);
+    app.addPackage(zpm.pkgs.maps);
     app.addPackage(zpm.pkgs.libgamestudio);
     app.addPackage(ode.getPackage("ode", ode_config));
     app.addPackage(std.build.Pkg{
         .name = "@GAME@",
         .source = .{ .path = source_file },
         .dependencies = &.{std.build.Pkg{
-            .name = "basegame",
+            .name = "zyclone",
             .source = .{ .path = "src/package.zig" },
         }},
     });
 
+    const libsoundio = soundio.createLibrary(options.target, .Static, .{});
+    libsoundio.setBuildMode(options.mode);
+
     const instance = app.compileFor(.{ .desktop = options.target });
     ode.linkTo(instance.data.desktop, .static, ode_config);
+    instance.data.desktop.linkLibrary(libsoundio);
+    for (soundio.getIncludePaths()) |path|
+        instance.data.desktop.addIncludePath(path);
+    instance.data.desktop.emit_docs = .{ .emit_to = "docs/" };
     instance.install();
 
     if (options.android) {
         const android_app = app.compileFor(.android);
+        for (android_app.data.android.libraries) |exe| {
+            ode.linkTo(exe, .static, ode_config);
+        }
         android_app.install();
     }
 }
@@ -56,6 +80,7 @@ pub fn build(b: *std.build.Builder) void {
 
     const sdk = zpm.sdks.@"zero-graphics".init(b, use_android);
     const ode = zpm.sdks.ode.init(b);
+    const soundio = zpm.sdks.soundio.init(b);
 
     const opts = Options{
         .android = use_android,
@@ -64,6 +89,7 @@ pub fn build(b: *std.build.Builder) void {
         .mode = mode,
     };
 
-    compileGame(sdk, ode, "future_demo", "Zyclone Future Demo", "demo/future/future.zig", opts);
-    compileGame(sdk, ode, "playground", "Zyclone Developer Playground", "demo/playground.zig", opts);
+    compileGame(sdk, ode, soundio, "future_demo", "Zyclone Future Demo", "demo/future/future.zig", opts);
+    compileGame(sdk, ode, soundio, "playground", "Zyclone Developer Playground", "demo/playground.zig", opts);
+    compileGame(sdk, ode, soundio, "chiptune", "Zyclone Audio Example", "demo/audio/chiptune.zig", opts);
 }

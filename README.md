@@ -27,3 +27,35 @@ The engine is designed in the spirit of Gamestudio both in API, and in usage, bu
 ## Community
 
 Zyclone game engine is discussed on our [Discord server](https://discord.gg/KWkGVSRKpA).
+
+## Examples
+
+### Physics Example
+
+```zig
+const std = @import("std");
+const eng = @import("basegame");
+
+pub fn main() !void {
+    eng.DefaultCamera.vel_slow = 64.0;
+    eng.DefaultCamera.vel_high = 256.0;
+
+    eng.level.load("levels/physics.wmb");
+    _ = eng.attach(eng.DefaultCamera);
+    _ = eng.attach(eng.DebugPanels);
+
+    const ball = eng.Entity.create("3ball.mdl", eng.vector(0, 3, 0), Kicker);
+    ball.setPhysicsType(.rigid, .sphere);
+
+}
+
+const Kicker = struct {
+    pub fn update(ent: *eng.Entity, _: *@This()) void {
+        if (eng.key.pressed(.space)) {
+            var kick_dir = eng.vec.forAngle(.{ .pan = eng.camera.rot.pan, .tilt = 0, .roll = 0 });
+            kick_dir.y = 0.7;
+            ent.addForceCentral(kick_dir.scale(1500000));
+        }
+    }
+};
+```

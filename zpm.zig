@@ -4,6 +4,10 @@
 const std = @import("std");
 
 pub const pkgs = struct {
+    pub const ziggysynth = std.build.Pkg{
+        .name = "ziggysynth",
+        .source = .{ .path = "vendor/ziggysynth//src/ziggysynth.zig" },
+    };
     pub const libgamestudio = std.build.Pkg{
         .name = "libgamestudio",
         .source = .{ .path = "vendor/libgamestudio/src/main.zig" },
@@ -12,6 +16,10 @@ pub const pkgs = struct {
         .name = "zlm",
         .source = .{ .path = "vendor/zlm/zlm.zig" },
     };
+    pub const maps = std.build.Pkg{
+        .name = "maps",
+        .source = .{ .path = "vendor/maps/src/maps.zig" },
+    };
     pub const ode = std.build.Pkg{
         .name = "ode",
         .source = .{ .path = "vendor/ode/src/ode.zig" },
@@ -19,5 +27,6 @@ pub const pkgs = struct {
 };
 pub const sdks = struct {
     pub const @"zero-graphics" = @import("vendor/zero-graphics/Sdk.zig");
+    pub const soundio = @import("vendor/soundio/Sdk.zig");
     pub const ode = @import("vendor/ode/Sdk.zig");
 };

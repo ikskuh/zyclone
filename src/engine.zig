@@ -5,6 +5,8 @@ const main = @import("entrypoint.zig");
 const gamestudio = @import("libgamestudio");
 const game = @import("@GAME@");
 const ode = @import("ode");
+const maps = @import("maps");
+const ziggysynth = @import("ziggysynth");
 
 fn core() *zg.CoreApplication {
     return zg.CoreApplication.get();
@@ -1670,6 +1672,288 @@ pub const stats = struct {
     }
 };
 
+pub const SoundHandle = maps.StreamHandle;
+
+pub const Sound = struct {
+    pub fn load(file_name: []const u8) *Sound {
+        return loadAt(std.fs.cwd(), file_name);
+    }
+
+    pub fn loadAt(dir: std.fs.Dir, file_name: []const u8) *Sound {
+        _ = dir;
+        _ = file_name;
+        return undefined;
+    }
+
+    pub fn play(snd: *Sound) ?SoundHandle {
+        _ = snd;
+        return null;
+    }
+
+    pub fn loop(snd: *Sound) ?SoundHandle {
+        _ = snd;
+        return null;
+    }
+};
+
+pub const sound = struct {
+    const c = @cImport({
+        @cInclude("soundio/soundio.h");
+    });
+
+    var lib: *c.SoundIo = undefined;
+    var device: *c.SoundIoDevice = undefined;
+    var outstream: *c.SoundIoOutStream = undefined;
+
+    const SoundIoError = error{
+        /// Out of memory.
+        OutOfMemory,
+        /// The backend does not appear to be active or running.
+        InitAudioBackend,
+        /// A system resource other than memory was not available.
+        SystemResources,
+        /// Attempted to open a device and failed.
+        OpeningDevice,
+        NoSuchDevice,
+        /// The programmer did not comply with the API.
+        Invalid,
+        /// libsoundio was compiled without support for that backend.
+        BackendUnavailable,
+        /// An open stream had an error that can only be recovered from by
+        /// destroying the stream and creating it again.
+        Streaming,
+        /// Attempted to use a device with parameters it cannot support.
+        IncompatibleDevice,
+        /// When JACK returns `JackNoSuchClient`
+        NoSuchClient,
+        /// Attempted to use parameters that the backend cannot support.
+        IncompatibleBackend,
+        /// Backend server shutdown or became inactive.
+        BackendDisconnected,
+        Interrupted,
+        /// Buffer underrun occurred.
+        Underflow,
+        /// Unable to convert to or from UTF-8 to the native string format.
+        EncodingString,
+
+        GenericError,
+    };
+
+    fn check(code: c_int) SoundIoError!void {
+        switch (code) {
+            c.SoundIoErrorNone => {},
+            c.SoundIoErrorNoMem => return error.OutOfMemory,
+            c.SoundIoErrorInitAudioBackend => return error.InitAudioBackend,
+            c.SoundIoErrorSystemResources => return error.SystemResources,
+            c.SoundIoErrorOpeningDevice => return error.OpeningDevice,
+            c.SoundIoErrorNoSuchDevice => return error.NoSuchDevice,
+            c.SoundIoErrorInvalid => return error.Invalid,
+            c.SoundIoErrorBackendUnavailable => return error.BackendUnavailable,
+            c.SoundIoErrorStreaming => return error.Streaming,
+            c.SoundIoErrorIncompatibleDevice => return error.IncompatibleDevice,
+            c.SoundIoErrorNoSuchClient => return error.NoSuchClient,
+            c.SoundIoErrorIncompatibleBackend => return error.IncompatibleBackend,
+            c.SoundIoErrorBackendDisconnected => return error.BackendDisconnected,
+            c.SoundIoErrorInterrupted => return error.Interrupted,
+            c.SoundIoErrorUnderflow => return error.Underflow,
+            c.SoundIoErrorEncodingString => return error.EncodingString,
+
+            else => {
+                std.log.scoped(.soundio).err("{s}", .{c.soundio_strerror(code)});
+                return error.GenericError;
+            },
+        }
+    }
+
+    fn init() !void {
+        lib = c.soundio_create() orelse oom();
+
+        try check(c.soundio_connect(lib));
+
+        std.log.info("audio backend: {s}", .{c.soundio_backend_name(lib.current_backend)});
+
+        c.soundio_flush_events(lib);
+
+        const device_index = c.soundio_default_output_device_index(lib);
+        if (device_index < 0) {
+            std.log.err("failed to open default audio device.", .{});
+            return;
+        }
+
+        device = c.soundio_get_output_device(lib, device_index) orelse oom();
+
+        std.log.info("audio device: {s}", .{device.name});
+
+        if (device.probe_error != 0) {
+            std.log.err("cannot probe device: {s}", .{c.soundio_strerror(device.probe_error)});
+            return;
+        }
+
+        outstream = c.soundio_outstream_create(device) orelse oom();
+
+        outstream.write_callback = audioWriteCallback;
+        outstream.underflow_callback = audioUnderflowCallback;
+        outstream.name = "Zyclone Audio";
+        outstream.software_latency = 0.0;
+        outstream.sample_rate = maps.sample_frequency;
+
+        if (c.soundio_device_supports_format(device, c.SoundIoFormatFloat32NE)) {
+            outstream.format = c.SoundIoFormatFloat32NE;
+            writeSample = writeSampleImpl(f32);
+            std.log.info("selecting audio format Float32NE", .{});
+        } else if (c.soundio_device_supports_format(device, c.SoundIoFormatFloat64NE)) {
+            outstream.format = c.SoundIoFormatFloat64NE;
+            writeSample = writeSampleImpl(f64);
+            std.log.info("selecting audio format Float64NE", .{});
+        } else if (c.soundio_device_supports_format(device, c.SoundIoFormatS32NE)) {
+            outstream.format = c.SoundIoFormatS32NE;
+            writeSample = writeSampleImpl(i32);
+            std.log.info("selecting audio format S32NE", .{});
+        } else if (c.soundio_device_supports_format(device, c.SoundIoFormatS16NE)) {
+            outstream.format = c.SoundIoFormatS16NE;
+            writeSample = writeSampleImpl(i16);
+            std.log.info("selecting audio format S16NE", .{});
+        } else {
+            std.log.err("No suitable device format available.", .{});
+            return;
+        }
+
+        try check(c.soundio_outstream_open(outstream));
+
+        std.log.info("software latency: {d:.3}\n", .{outstream.software_latency});
+
+        if (outstream.layout_error != 0) {
+            std.log.err("unable to set channel layout: {s}", .{c.soundio_strerror(device.probe_error)});
+            return;
+        }
+
+        try check(c.soundio_outstream_start(outstream));
+
+        // for (;;) {
+        //
+        //     int c = getc(stdin);
+        //     if (c == 'p') {
+        //         fprintf(stderr, "pausing result: %s\n",
+        //                 soundio_strerror(soundio_outstream_pause(outstream, true)));
+        //     } else if (c == 'P') {
+        //         want_pause = true;
+        //     } else if (c == 'u') {
+        //         want_pause = false;
+        //         fprintf(stderr, "unpausing result: %s\n",
+        //                 soundio_strerror(soundio_outstream_pause(outstream, false)));
+        //     } else if (c == 'c') {
+        //         fprintf(stderr, "clear buffer result: %s\n",
+        //                 soundio_strerror(soundio_outstream_clear_buffer(outstream)));
+        //     } else if (c == 'q') {
+        //         break;
+        //     } else if (c == '\r' || c == '\n') {
+        //         // ignore
+        //     } else {
+        //         fprintf(stderr, "Unrecognized command: %c\n", c);
+        //     }
+        // }
+
+        // soundio_outstream_destroy(outstream);
+        // soundio_device_unref(device);
+        // soundio_destroy(soundio);
+
+    }
+
+    fn update() void {
+        c.soundio_flush_events(lib);
+    }
+
+    fn audioUnderflowCallback(stream: ?*c.SoundIoOutStream) callconv(.C) void {
+        const T = struct {
+            var count: usize = 0;
+        };
+        std.log.err("audio underflow {d}!", .{T.count});
+        T.count += 1;
+        _ = stream;
+    }
+
+    var writeSample: *const fn (address: [*]u8, sample: f32) void = undefined;
+
+    fn writeSampleImpl(comptime fmt: type) fn (address: [*]u8, sample: f32) void {
+        return struct {
+            fn f(address: [*]u8, sample: f32) void {
+                const p = @alignCast(@alignOf(fmt), address);
+                switch (fmt) {
+                    i16 => @ptrCast(*i16, p).* = mapToIntegerSample(i16, sample),
+                    i32 => @ptrCast(*i32, p).* = mapToIntegerSample(i32, sample),
+                    f32 => @ptrCast(*f32, p).* = sample,
+                    f64 => @ptrCast(*f64, p).* = sample,
+                    else => @compileError("Unsupported sample type: " ++ @typeName(fmt)),
+                }
+            }
+        }.f;
+    }
+
+    fn mapToIntegerSample(comptime S: type, in: f32) S {
+        const lo = std.math.minInt(S);
+        const hi = std.math.maxInt(S);
+        return @floatToInt(S, std.math.clamp(
+            (hi - lo) * (0.5 + 0.5 * in) + lo,
+            lo,
+            hi,
+        ));
+    }
+
+    var seconds_offset: f32 = 0.0;
+    var want_pause = false;
+    fn audioWriteCallback(maybe_stream: ?*c.SoundIoOutStream, frame_count_min: c_int, frame_count_max: c_int) callconv(.C) void {
+        _ = frame_count_min;
+        const stream = maybe_stream.?;
+
+        const float_sample_rate: f32 = @intToFloat(f32, stream.sample_rate);
+        const seconds_per_frame = 1.0 / float_sample_rate;
+        // int err;
+
+        var frames_left = frame_count_max;
+
+        while (true) {
+            var frame_count = frames_left;
+
+            var maybe_areas: ?[*]c.SoundIoChannelArea = undefined;
+            check(c.soundio_outstream_begin_write(stream, &maybe_areas, &frame_count)) catch |err| {
+                std.debug.panic("unrecoverable stream error: {}", .{err});
+            };
+
+            if (frame_count == 0)
+                break;
+
+            const areas = maybe_areas.?;
+
+            const layout = &stream.layout;
+
+            const pitch = 440.0;
+            const radians_per_second = pitch * std.math.tau;
+
+            var frame: usize = 0;
+            while (frame < frame_count) : (frame += 1) {
+                var sample = @sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
+
+                for (areas[0..@intCast(usize, layout.channel_count)]) |*area| {
+                    writeSample(area.ptr, sample);
+                    area.ptr += @intCast(usize, area.step);
+                }
+            }
+            seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, frame_count), 1.0);
+
+            check(c.soundio_outstream_end_write(stream)) catch |err| switch (err) {
+                error.Underflow => return,
+                else => std.debug.panic("unrecoverable stream error {}", .{err}),
+            };
+
+            frames_left -= frame_count;
+            if (frames_left <= 0)
+                break;
+        }
+
+        _ = c.soundio_outstream_pause(outstream, want_pause);
+    }
+};
+
 /// do not use this!
 /// it's meant for internal use of the engine
 pub const __implementation = struct {
@@ -1691,6 +1975,9 @@ pub const __implementation = struct {
     pub fn init(app: *Application) !void {
         app.* = .{};
 
+        mem.backing = core().allocator;
+        level.arena = std.heap.ArenaAllocator.init(mem.backing);
+
         physics.init();
 
         r2d = try core().resources.createRenderer2D();
@@ -1703,8 +1990,7 @@ pub const __implementation = struct {
         interface = try zg.UserInterface.init(mem.backing, &r2d);
         interface.default_font = draw.default_font;
 
-        mem.backing = core().allocator;
-        level.arena = std.heap.ArenaAllocator.init(mem.backing);
+        try sound.init();
 
         // scheduler = Scheduler.init();
         // defer scheduler.deinit();
@@ -1784,6 +2070,8 @@ pub const __implementation = struct {
         r2d.reset();
         r3d.reset();
         debug3d.reset();
+
+        sound.update();
 
         {
             var measure = stats.measure(.logic);
@@ -2756,7 +3044,11 @@ fn BehaviourSystem(comptime memory_module: type, comptime Context: type) type {
             };
 
             if (@hasDecl(Behaviour, "init")) {
-                Behaviour.init(context, &storage.data);
+                if (Context == void) {
+                    Behaviour.init(&storage.data);
+                } else {
+                    Behaviour.init(context, &storage.data);
+                }
             } else {
                 // If no init function is present,
                 // we use a default initalization.

@@ -1,5 +1,5 @@
 const std = @import("std");
-const eng = @import("basegame");
+const eng = @import("zyclone");
 
 pub fn main() !void {
     eng.DefaultCamera.vel_slow = 64.0;
