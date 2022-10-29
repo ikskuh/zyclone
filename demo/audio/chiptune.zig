@@ -9,7 +9,7 @@ pub const Interface = struct {
     var snd: *eng.Sound = undefined;
 
     pub fn init(_: *Interface) void {
-        snd = eng.Sound.load("ribanna.mid");
+        snd = eng.Sound.load("ribanna.mid") orelse @panic("file not found!");
     }
 
     pub fn update(_: *Interface) void {

@@ -1674,25 +1674,104 @@ pub const stats = struct {
 
 pub const SoundHandle = maps.StreamHandle;
 
-pub const Sound = struct {
-    pub fn load(file_name: []const u8) *Sound {
+pub const MidiFile = struct {
+    data: ziggysynth.MidiFile,
+
+    pub fn load(file: std.fs.File) MidiFile {
+        var midi_file = ziggysynth.MidiFile.init(mem.backing, file.reader()) catch |err| panic(err);
+
+        return MidiFile{
+            .data = midi_file,
+        };
+    }
+
+    const MidiPlayBack = struct {
+        sequencer: ziggysynth.MidiFileSequencer,
+
+        fn create(file: ziggysynth.MidiFile) maps.AudioSource {
+            var synthesizer = ziggysynth.Synthesizer.init(
+                mem.backing,
+                sound.midi_sound_font.*,
+                sound.midi_synth_settings,
+            ) catch |err| panic(err);
+
+            // Create the sequencer.
+            var sequencer = ziggysynth.MidiFileSequencer.init(mem.backing, synthesizer) catch |err| panic(err);
+
+            // Play the MIDI file.
+            sequencer.play(file, false);
+
+            const ptr = mem.create(MidiPlayBack);
+            ptr.* = .{
+                .sequencer = sequencer,
+            };
+            return maps.AudioSource.create(ptr, &vtable);
+        }
+
+        fn fetchData(src: maps.AudioSource, offset_hint: usize, left: []maps.Sample, right: []maps.Sample) usize {
+            _ = offset_hint;
+            const midi = src.cast(MidiPlayBack);
+            midi.sequencer.render(left, right);
+            return left.len;
+        }
+
+        fn deleteData(src: maps.AudioSource) void {
+            const playback = src.cast(MidiPlayBack);
+            playback.sequencer.synthesizer.deinit();
+            playback.sequencer.deinit();
+            mem.destroy(playback);
+        }
+
+        const vtable = maps.AudioSource.VTable{
+            .fetchPtr = fetchData,
+            .deletePtr = deleteData,
+        };
+    };
+
+    pub fn audioSource(midi: MidiFile) maps.AudioSource {
+        return MidiPlayBack.create(midi.data);
+    }
+};
+
+pub const Sound = union(enum) {
+    midi: MidiFile,
+
+    pub fn load(file_name: []const u8) ?*Sound {
         return loadAt(std.fs.cwd(), file_name);
     }
 
-    pub fn loadAt(dir: std.fs.Dir, file_name: []const u8) *Sound {
-        _ = dir;
-        _ = file_name;
-        return undefined;
+    pub fn loadAt(dir: std.fs.Dir, file_name: []const u8) ?*Sound {
+        const extension = std.fs.path.extension(file_name);
+
+        var file = dir.openFile(file_name, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => |e| panic(e),
+        };
+        defer file.close();
+
+        if (std.mem.eql(u8, extension, ".mid")) {
+            const snd = mem.create(Sound);
+            snd.* = Sound{
+                .midi = MidiFile.load(file),
+            };
+            return snd;
+        } else {
+            @panic("unsupported file name!");
+        }
     }
 
     pub fn play(snd: *Sound) ?SoundHandle {
-        _ = snd;
-        return null;
+        return sound.mixer.play(snd.audioSource(), null, .once) catch null;
     }
 
     pub fn loop(snd: *Sound) ?SoundHandle {
-        _ = snd;
-        return null;
+        return sound.mixer.play(snd.audioSource(), null, .forever) catch null;
+    }
+
+    fn audioSource(snd: *Sound) maps.AudioSource {
+        return switch (snd.*) {
+            inline else => |*item| item.audioSource(),
+        };
     }
 };
 
@@ -1705,67 +1784,27 @@ pub const sound = struct {
     var device: *c.SoundIoDevice = undefined;
     var outstream: *c.SoundIoOutStream = undefined;
 
-    const SoundIoError = error{
-        /// Out of memory.
-        OutOfMemory,
-        /// The backend does not appear to be active or running.
-        InitAudioBackend,
-        /// A system resource other than memory was not available.
-        SystemResources,
-        /// Attempted to open a device and failed.
-        OpeningDevice,
-        NoSuchDevice,
-        /// The programmer did not comply with the API.
-        Invalid,
-        /// libsoundio was compiled without support for that backend.
-        BackendUnavailable,
-        /// An open stream had an error that can only be recovered from by
-        /// destroying the stream and creating it again.
-        Streaming,
-        /// Attempted to use a device with parameters it cannot support.
-        IncompatibleDevice,
-        /// When JACK returns `JackNoSuchClient`
-        NoSuchClient,
-        /// Attempted to use parameters that the backend cannot support.
-        IncompatibleBackend,
-        /// Backend server shutdown or became inactive.
-        BackendDisconnected,
-        Interrupted,
-        /// Buffer underrun occurred.
-        Underflow,
-        /// Unable to convert to or from UTF-8 to the native string format.
-        EncodingString,
+    var mixer: maps.Mixer = .{};
 
-        GenericError,
-    };
+    var fluid_r3_gm: ziggysynth.SoundFont = undefined;
+    pub var midi_sound_font: *ziggysynth.SoundFont = &fluid_r3_gm;
+    const midi_synth_settings = ziggysynth.SynthesizerSettings.init(44100);
 
-    fn check(code: c_int) SoundIoError!void {
-        switch (code) {
-            c.SoundIoErrorNone => {},
-            c.SoundIoErrorNoMem => return error.OutOfMemory,
-            c.SoundIoErrorInitAudioBackend => return error.InitAudioBackend,
-            c.SoundIoErrorSystemResources => return error.SystemResources,
-            c.SoundIoErrorOpeningDevice => return error.OpeningDevice,
-            c.SoundIoErrorNoSuchDevice => return error.NoSuchDevice,
-            c.SoundIoErrorInvalid => return error.Invalid,
-            c.SoundIoErrorBackendUnavailable => return error.BackendUnavailable,
-            c.SoundIoErrorStreaming => return error.Streaming,
-            c.SoundIoErrorIncompatibleDevice => return error.IncompatibleDevice,
-            c.SoundIoErrorNoSuchClient => return error.NoSuchClient,
-            c.SoundIoErrorIncompatibleBackend => return error.IncompatibleBackend,
-            c.SoundIoErrorBackendDisconnected => return error.BackendDisconnected,
-            c.SoundIoErrorInterrupted => return error.Interrupted,
-            c.SoundIoErrorUnderflow => return error.Underflow,
-            c.SoundIoErrorEncodingString => return error.EncodingString,
+    var samples_played: u64 = 0;
 
-            else => {
-                std.log.scoped(.soundio).err("{s}", .{c.soundio_strerror(code)});
-                return error.GenericError;
-            },
-        }
+    /// Returns a precise time from the audio callback that will
+    /// not jitter much. Can be used to synchronize animations with
+    /// audio.
+    pub fn time() f64 {
+        return @intToFloat(f64, samples_played) / maps.sample_frequency;
     }
 
     fn init() !void {
+        {
+            var fbs = std.io.fixedBufferStream(@embedFile("assets/soundfonts/FluidR3_GM.sf2"));
+            fluid_r3_gm = try ziggysynth.SoundFont.init(mem.backing, fbs.reader());
+        }
+
         lib = c.soundio_create() orelse oom();
 
         try check(c.soundio_connect(lib));
@@ -1899,22 +1938,22 @@ pub const sound = struct {
         ));
     }
 
-    var seconds_offset: f32 = 0.0;
     var want_pause = false;
+
     fn audioWriteCallback(maybe_stream: ?*c.SoundIoOutStream, frame_count_min: c_int, frame_count_max: c_int) callconv(.C) void {
         _ = frame_count_min;
-        const stream = maybe_stream.?;
 
-        const float_sample_rate: f32 = @intToFloat(f32, stream.sample_rate);
-        const seconds_per_frame = 1.0 / float_sample_rate;
-        // int err;
+        const stream = maybe_stream.?;
+        const layout = &stream.layout;
 
         var frames_left = frame_count_max;
-
         while (true) {
-            var frame_count = frames_left;
+            var left_buffer: [1024]f32 = undefined;
+            var right_buffer: [left_buffer.len]f32 = undefined;
 
+            var frame_count: c_int = std.math.min(comptime @as(c_int, left_buffer.len), frames_left);
             var maybe_areas: ?[*]c.SoundIoChannelArea = undefined;
+
             check(c.soundio_outstream_begin_write(stream, &maybe_areas, &frame_count)) catch |err| {
                 std.debug.panic("unrecoverable stream error: {}", .{err});
             };
@@ -1923,22 +1962,29 @@ pub const sound = struct {
                 break;
 
             const areas = maybe_areas.?;
+            const actual_count = @intCast(usize, frame_count);
 
-            const layout = &stream.layout;
+            const left_samples = left_buffer[0..actual_count];
+            const right_samples = right_buffer[0..actual_count];
 
-            const pitch = 440.0;
-            const radians_per_second = pitch * std.math.tau;
+            mixer.mix(left_samples, right_samples);
 
-            var frame: usize = 0;
-            while (frame < frame_count) : (frame += 1) {
-                var sample = @sin((seconds_offset + @intToFloat(f32, frame) * seconds_per_frame) * radians_per_second);
-
-                for (areas[0..@intCast(usize, layout.channel_count)]) |*area| {
-                    writeSample(area.ptr, sample);
-                    area.ptr += @intCast(usize, area.step);
+            if (layout.channel_count == 1) {
+                for (left_samples) |l, i| {
+                    const r = right_samples[i];
+                    pushSample(&areas[0], 0.5 * (l + r));
                 }
+            } else if (layout.channel_count == 2) {
+                for (left_samples) |l, i| {
+                    const r = right_samples[i];
+                    pushSample(&areas[0], l);
+                    pushSample(&areas[1], r);
+                }
+            } else {
+                std.log.warn("audio playback for {} channels not supported!", .{layout.channel_count});
             }
-            seconds_offset = @mod(seconds_offset + seconds_per_frame * @intToFloat(f32, frame_count), 1.0);
+
+            samples_played += @as(u64, actual_count);
 
             check(c.soundio_outstream_end_write(stream)) catch |err| switch (err) {
                 error.Underflow => return,
@@ -1951,6 +1997,71 @@ pub const sound = struct {
         }
 
         _ = c.soundio_outstream_pause(outstream, want_pause);
+    }
+
+    fn pushSample(area: *c.SoundIoChannelArea, sample: f32) void {
+        writeSample(area.ptr, sample);
+        area.ptr += @intCast(usize, area.step);
+    }
+
+    const SoundIoError = error{
+        /// Out of memory.
+        OutOfMemory,
+        /// The backend does not appear to be active or running.
+        InitAudioBackend,
+        /// A system resource other than memory was not available.
+        SystemResources,
+        /// Attempted to open a device and failed.
+        OpeningDevice,
+        NoSuchDevice,
+        /// The programmer did not comply with the API.
+        Invalid,
+        /// libsoundio was compiled without support for that backend.
+        BackendUnavailable,
+        /// An open stream had an error that can only be recovered from by
+        /// destroying the stream and creating it again.
+        Streaming,
+        /// Attempted to use a device with parameters it cannot support.
+        IncompatibleDevice,
+        /// When JACK returns `JackNoSuchClient`
+        NoSuchClient,
+        /// Attempted to use parameters that the backend cannot support.
+        IncompatibleBackend,
+        /// Backend server shutdown or became inactive.
+        BackendDisconnected,
+        Interrupted,
+        /// Buffer underrun occurred.
+        Underflow,
+        /// Unable to convert to or from UTF-8 to the native string format.
+        EncodingString,
+
+        GenericError,
+    };
+
+    fn check(code: c_int) SoundIoError!void {
+        switch (code) {
+            c.SoundIoErrorNone => {},
+            c.SoundIoErrorNoMem => return error.OutOfMemory,
+            c.SoundIoErrorInitAudioBackend => return error.InitAudioBackend,
+            c.SoundIoErrorSystemResources => return error.SystemResources,
+            c.SoundIoErrorOpeningDevice => return error.OpeningDevice,
+            c.SoundIoErrorNoSuchDevice => return error.NoSuchDevice,
+            c.SoundIoErrorInvalid => return error.Invalid,
+            c.SoundIoErrorBackendUnavailable => return error.BackendUnavailable,
+            c.SoundIoErrorStreaming => return error.Streaming,
+            c.SoundIoErrorIncompatibleDevice => return error.IncompatibleDevice,
+            c.SoundIoErrorNoSuchClient => return error.NoSuchClient,
+            c.SoundIoErrorIncompatibleBackend => return error.IncompatibleBackend,
+            c.SoundIoErrorBackendDisconnected => return error.BackendDisconnected,
+            c.SoundIoErrorInterrupted => return error.Interrupted,
+            c.SoundIoErrorUnderflow => return error.Underflow,
+            c.SoundIoErrorEncodingString => return error.EncodingString,
+
+            else => {
+                std.log.scoped(.soundio).err("{s}", .{c.soundio_strerror(code)});
+                return error.GenericError;
+            },
+        }
     }
 };
 

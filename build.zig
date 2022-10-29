@@ -63,6 +63,13 @@ pub fn compileGame(
     instance.data.desktop.emit_docs = .{ .emit_to = "docs/" };
     instance.install();
 
+    const run_step = zg.builder.step(file_name, zg.builder.fmt("Runs the example {s}", .{file_name}));
+
+    const run = instance.run();
+    run.cwd = std.fs.path.dirname(source_file);
+
+    run_step.dependOn(&run.step);
+
     if (options.android) {
         const android_app = app.compileFor(.android);
         for (android_app.data.android.libraries) |exe| {
