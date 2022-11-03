@@ -1,21 +1,3 @@
-[submodule "vendor/zlm"]
-	path = vendor/zlm
-	url = https://github.com/ziglibs/zlm
-[submodule "vendor/zero-graphics"]
-	path = vendor/zero-graphics
-	url = https://github.com/MasterQ32/zero-graphics
-[submodule "vendor/libgamestudio"]
-	path = vendor/libgamestudio
-	url = https://github.com/MasterQ32/libgamestudio.git
-[submodule "vendor/ode"]
-	path = vendor/ode
-	url = https://github.com/MasterQ32/zig-ode
-[submodule "vendor/soundio"]
-	path = vendor/soundio
-	url = https://github.com/andrewrk/libsoundio
-[submodule "vendor/maps"]
-	path = vendor/maps
-	url = https://github.com/MasterQ32/maps
-[submodule "vendor/ziggysynth"]
-	path = vendor/ziggysynth
-	url = https://github.com/sinshu/ziggysynth
+version https://git-lfs.github.com/spec/v1
+oid sha256:52d3d555b561a12bce2a1d4ef9153022055cee4c4bcdb6c88089012dd83f4500
+size 689

@@ -1,22 +1,3 @@
-const std = @import("std");
-const eng = @import("zyclone");
-
-pub fn main() !void {
-    _ = eng.attach(Interface);
-}
-
-pub const Interface = struct {
-    var snd: *eng.Sound = undefined;
-
-    pub fn init(_: *Interface) void {
-        snd = eng.Sound.load("ribanna.mid") orelse @panic("file not found!");
-    }
-
-    pub fn update(_: *Interface) void {
-        if (eng.key.pressed(.escape))
-            eng.exit();
-
-        if (eng.key.pressed(.space))
-            _ = snd.play();
-    }
-};
+version https://git-lfs.github.com/spec/v1
+oid sha256:82040913cda7048afbed400dab49d50f29acb9053b681a7c147aac38d7930ac3
+size 486

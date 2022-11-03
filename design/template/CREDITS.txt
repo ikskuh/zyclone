@@ -1,15 +1,3 @@
-
-Logo
-	Source:
-		https://www.vecteezy.com/vector-art/11747932-hurricane-logo-symbol-icon-illustration-vector
-	Author:
-		abi pandu
-		https://www.vecteezy.com/members/abi-pw02117595
-
-Font
-	Source:
-		https://www.dafont.com/distortion-dos-analogue.font
-	Author:
-		Chequered Ink
-		https://chequered.ink/
-	
+version https://git-lfs.github.com/spec/v1
+oid sha256:4fd01f47e1d909fa0c4200ed494bedd6e16f52e505ce59659fc70375a29a6b8f
+size 301

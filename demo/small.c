@@ -1,12 +1,3 @@
-////////////////////////////////////////////////////////////////////////////
-// small.c - small lite-C example
-////////////////////////////////////////////////////////////////////////////
-
-function main()
-{
-	// Load the terrain named "small.hmp"
-	level_load("small.hmp"); 
-	// Now create the "earth.mdl" model at x = 10, y = 20, z = 30 in our 3D world
-	ent_create("earth.mdl", vector(10, 20, 30), NULL);
-	// NULL tells the engine that the model doesn't have to do anything
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:3745705fa36646ba6473e9c4de4fecaa1eaf68d3a1715343d0871b24e3fd9e42
+size 485
